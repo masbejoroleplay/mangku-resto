@@ -1,0 +1,2603 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Mangku Resto Dashboard</title>
+
+  <!--
+  ═══════════════════════════════════════════════════════════
+  SECURITY CHECKLIST (baca sebelum deploy):
+  ═══════════════════════════════════════════════════════════
+  1. FIRESTORE RULES → paste rules di bawah ke Firebase Console > Firestore > Rules:
+
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+
+      function isSignedIn()  { return request.auth != null; }
+      function isAdmin()     { return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'; }
+      function isOwner(uid)  { return isSignedIn() && request.auth.uid == uid; }
+
+      match /users/{uid} {
+        allow read:   if isOwner(uid) || isAdmin();
+        allow create: if isAdmin();
+        allow update: if isOwner(uid) || isAdmin();
+        allow delete: if isAdmin();
+      }
+
+      match /absensi/{docId} {
+        allow read:   if isSignedIn() &&
+                         (resource.data.id_karyawan == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.id_karyawan
+                          || isAdmin());
+        allow create: if isSignedIn();
+        allow update: if isAdmin();
+        allow delete: if isAdmin();
+      }
+
+      match /karyawan/{docId} {
+        allow read:   if isSignedIn();
+        allow write:  if isAdmin();
+      }
+
+      match /cuti/{docId} {
+        allow read:   if isSignedIn() &&
+                         (resource.data.id_karyawan == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.id_karyawan
+                          || isAdmin());
+        allow create: if isSignedIn();
+        allow update: if isAdmin();
+        allow delete: if isAdmin();
+      }
+
+      match /inventaris_stok/{docId} {
+        allow read:   if isSignedIn();
+        allow write:  if isSignedIn();
+      }
+      match /inventaris_logs/{docId} {
+        allow read:   if isSignedIn();
+        allow create: if isSignedIn();
+        allow delete: if isAdmin();
+      }
+
+      // inv_items: semua staff bisa baca, hanya admin yang write
+      match /inv_items/{docId} {
+        allow read:   if isSignedIn();
+        allow write:  if isAdmin();
+      }
+    }
+  }
+
+  2. FIREBASE API KEY RESTRICTION → Google Cloud Console
+  3. NETLIFY (_headers file di root project)
+  4. WEBHOOK SECURITY: URL webhook visible di DevTools. Untuk produksi, gunakan Netlify Function.
+  5. SESSION EXPIRY: Firebase Auth token expire otomatis setiap 1 jam.
+  ═══════════════════════════════════════════════════════════
+  -->
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
+
+  <script src="https://www.gstatic.com/firebasejs/12.1.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.1.0/firebase-auth-compat.js"></script>
+  <script src="cloud-backend.js?v=20260712-9"></script>
+  <script>
+
+    // ══════════════════════════════════════════════════════════════
+    // FIREBASE CONFIG
+    // ══════════════════════════════════════════════════════════════
+    const firebaseConfig = {
+      apiKey: "AIzaSyDLqwi05_8bX1dT_rI4_LzGA6VEQ36pLrM",
+      authDomain: "mangku-resto.firebaseapp.com",
+      projectId: "mangku-resto",
+      storageBucket: "mangku-resto.firebasestorage.app",
+      messagingSenderId: "710675263153",
+      appId: "1:710675263153:web:4c68ac72440bc1da36fc90"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+
+    // ══════════════════════════════════════════════════════════════
+    // DISCORD WEBHOOK CONFIG
+    // ══════════════════════════════════════════════════════════════
+    const WEBHOOK_CONFIG = {}; // mode lokal: integrasi Discord dinonaktifkan
+
+    const LOKASI_WEBHOOK_MAP = {
+      'Kulkas': 'kulkas',
+      'Brangkas': 'brangkas'
+    };
+
+    // ══════════════════════════════════════════════════════════════
+    // INV_ITEMS — dynamic, loaded from Firestore collection `inv_items`
+    // Format dokumen: { nama_barang: string, lokasi: string[] }
+    // INV_ITEMS shape: { 'Lokasi': ['Item1', 'Item2', ...] }
+    // ══════════════════════════════════════════════════════════════
+    const COOKING_STOCK_ITEMS = ['Paket Biasa','Paket Kenyang'];
+    let INV_ITEMS = { 'Kulkas': [...COOKING_STOCK_ITEMS], 'Brangkas': [] };
+    let invItemsLoaded = false;
+    let _loadingInvItems = false;
+
+    async function loadInvItems(forceRefresh = false) {
+      if (_loadingInvItems) return;
+      if (invItemsLoaded && !forceRefresh) return;
+      _loadingInvItems = true;
+      try {
+        const snap = await getDocs(collection(db, 'inv_items'));
+        // Reset
+        INV_ITEMS = { 'Kulkas': [...COOKING_STOCK_ITEMS], 'Brangkas': [] };
+        snap.docs.forEach(d => {
+          const data = d.data();
+          const nama = data.nama_barang || '';
+          const locs = Array.isArray(data.lokasi) ? data.lokasi : [];
+          locs.forEach(lok => {
+            if (!INV_ITEMS[lok]) INV_ITEMS[lok] = [];
+            if (nama && !INV_ITEMS[lok].includes(nama)) INV_ITEMS[lok].push(nama);
+          });
+        });
+        // Sort alphabetically per location
+        Object.keys(INV_ITEMS).forEach(k => INV_ITEMS[k].sort());
+        invItemsLoaded = true;
+      } catch(e) {
+        showToast('error', 'Gagal memuat data item inventaris: ' + e.message);
+      } finally {
+        _loadingInvItems = false;
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // DISCORD HELPER
+    // ══════════════════════════════════════════════════════════════
+    async function sendToDiscord(target, payload) {
+      try { return await sendApiWebhook(target, payload); }
+      catch (error) { console.error('Discord webhook gagal:', error); }
+    }
+
+    function discordAbsensi(action, nama, jabatan, idKaryawan, waktu) {
+      const isIn    = action === 'clockIn';
+      const unixTs  = Math.floor(waktu.getTime() / 1000);
+      return sendToDiscord('absensi', {
+        embeds: [{
+          author: {
+            name    : 'Log Absensi · Mangku Resto Dashboard',
+            icon_url: 'https://cdn-icons-png.flaticon.com/512/1067/1067357.png'
+          },
+          title : isIn ? '✅ Clock In' : '🚪 Clock Out',
+          color : isIn ? 5763719 : 15548997,
+          fields: [
+            { name: '👤 Nama',     value: `**${nama}**`,       inline: true  },
+            { name: '💼 Jabatan',  value: `\`${jabatan}\``,    inline: true  },
+            { name: '🪪 ID',       value: `\`${idKaryawan}\``, inline: true  },
+            { name: '⏰ Waktu',    value: `<t:${unixTs}:F>`,   inline: false }
+          ],
+          footer: { text: 'Attendance System · Bahamas' },
+          timestamp: waktu.toISOString()
+        }]
+      });
+    }
+
+    function discordInventaris(tipe, items, lokasi, namaUser, waktu) {
+      const isDeposit = tipe === 'Deposit';
+      const unixTs    = Math.floor(waktu.getTime() / 1000);
+      const webhookKey = LOKASI_WEBHOOK_MAP[lokasi] || 'kulkas';
+      const itemList  = items.map(i => `• **${i.barang}** — \`${i.jumlah}x\``).join('\n');
+      return sendToDiscord(webhookKey, {
+        embeds: [{
+          author: {
+            name    : `Inventory Log · ${lokasi}`,
+            icon_url: 'https://cdn-icons-png.flaticon.com/512/2897/2897868.png'
+          },
+          title : isDeposit ? '📥 Deposit — Barang Masuk' : '📤 WD — Barang Keluar',
+          color : isDeposit ? 5763719 : 15548997,
+          fields: [
+            { name: '📦 Item',    value: itemList,             inline: false },
+            { name: '📍 Lokasi', value: `\`${lokasi}\``,      inline: true  },
+            { name: '👤 User',   value: `**${namaUser}**`,    inline: true  },
+            { name: '⏰ Waktu',  value: `<t:${unixTs}:F>`,    inline: false }
+          ],
+          footer   : { text: 'Inventory System · Bahamas' },
+          timestamp: waktu.toISOString()
+        }]
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // IDLE SESSION TIMEOUT (15 menit → auto logout)
+    // ══════════════════════════════════════════════════════════════
+    const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+    let idleTimer = null;
+
+    function resetIdleTimer() {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(async () => {
+        if (auth.currentUser) {
+          showToast('warning', 'Sesi berakhir karena tidak aktif. Silakan login kembali.');
+          await doLogout();
+        }
+      }, IDLE_TIMEOUT_MS);
+    }
+
+    function startIdleWatcher() {
+      ['mousemove','keydown','click','touchstart','scroll'].forEach(ev => {
+        document.addEventListener(ev, resetIdleTimer, { passive: true });
+      });
+      resetIdleTimer();
+    }
+
+    function stopIdleWatcher() {
+      clearTimeout(idleTimer);
+      ['mousemove','keydown','click','touchstart','scroll'].forEach(ev => {
+        document.removeEventListener(ev, resetIdleTimer);
+      });
+    }
+
+    // ── SALARY RATES ──────────────────────────────────────────────
+    const SALARY_RATES = {
+      'Magang':  { gaji_24_jam: 1500000 },
+      'Pelayan': { gaji_24_jam: 2000000 },
+      'Koki':    { gaji_24_jam: 2500000 },
+      'HRD':     { gaji_24_jam: 3000000 },
+    };
+    const OVERTIME_THRESHOLD_JAM = 24;
+    const OVERTIME_RATE_PER_JAM  = 50000;
+
+    const STAFF_DEFAULT_DAYS = 7;
+    const KARYAWAN_LS_KEY    = 'presensipro_karyawan';
+    const KARYAWAN_LS_TS_KEY = 'presensipro_karyawan_ts';
+    const SESSION_LS_KEY     = 'presensipro_last_session';
+    const KARYAWAN_CACHE_TTL = 60 * 60 * 1000;
+
+    // ══════════════════════════════════════════════════════════════
+    // CACHE LAYER
+    // ══════════════════════════════════════════════════════════════
+    const Cache = {
+      karyawan: null, stok: null, stokTs: null, akunList: null,
+      _rekap: {}, _gaji: {}, _cuti: {}, _log: {},
+      TTL: 30 * 60 * 1000, TTL_STOK: 30 * 60 * 1000,
+      isStale(ts)     { return !ts || (Date.now() - ts) > this.TTL; },
+      isStokStale()   { return !this.stokTs || (Date.now() - this.stokTs) > this.TTL_STOK; },
+      setRekap(k,d)   { this._rekap[k] = { data:d, ts:Date.now() }; },
+      getRekap(k)     { const e=this._rekap[k]; return e&&!this.isStale(e.ts)?e.data:null; },
+      invalidateRekap(){ this._rekap = {}; },
+      setGaji(k,d)    { this._gaji[k] = { data:d, ts:Date.now() }; },
+      getGaji(k)      { const e=this._gaji[k]; return e&&!this.isStale(e.ts)?e.data:null; },
+      setCuti(k,d)    { this._cuti[k] = { data:d, ts:Date.now() }; },
+      getCuti(k)      { const e=this._cuti[k]; return e&&!this.isStale(e.ts)?e.data:null; },
+      invalidateCuti(){ this._cuti = {}; },
+      setLog(k,d)     { this._log[k] = { data:d, ts:Date.now() }; },
+      getLog(k)       { const e=this._log[k]; return e&&!this.isStale(e.ts)?e.data:null; },
+      invalidateLog() { this._log = {}; },
+    };
+
+    let currentUser     = null;
+    let currentProfile  = null;
+    let karyawanList    = [];
+    let gajiDoneState   = {};
+    let gajiCurrentData = [];
+    let lastOpenSessionId = null;
+
+    let _loadingRekap = false, _loadingGaji = false, _loadingCuti = false,
+        _loadingStok  = false, _loadingLog  = false;
+
+    // ══════════════════════════════════════════════════════════════
+    // BUTTON ACTION HELPER
+    // ══════════════════════════════════════════════════════════════
+    async function runAction(btn, asyncFn, idleHtml) {
+      if (btn?.disabled) return;
+      const original = idleHtml || btn?.innerHTML || '';
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add('is-processing');
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Memproses...';
+      }
+      try { await asyncFn(); }
+      finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove('is-processing');
+          btn.innerHTML = original;
+        }
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // AUTH STATE
+    // ══════════════════════════════════════════════════════════════
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        try {
+          currentUser = user;
+          const cached=JSON.parse(sessionStorage.getItem('mangku_profile_cache')||'null');
+          let rendered=false;
+          if(cached?.uid===user.uid&&['admin','staff'].includes(cached.profile?.role)){
+            currentProfile=cached.profile;renderForRole();rendered=true;
+          }
+          const snap = await getDoc(doc(db, 'users', user.uid));
+          if (snap.exists()) {
+          currentProfile = snap.data();sessionStorage.setItem('mangku_profile_cache',JSON.stringify({uid:user.uid,profile:currentProfile}));
+          if (!['admin','staff'].includes(currentProfile.role)) {
+            showToast('error', 'Role tidak dikenali. Hubungi admin.');
+            await signOut(auth); return;
+          }
+          if(!rendered)renderForRole();
+          await Promise.all([loadInvItems(),loadKaryawan()]);
+          startIdleWatcher();
+          setInterval(updateClock, 1000); updateClock();
+          updateDate(); setInterval(updateDate, 60000);
+          } else {
+            showToast('error', 'Profil pengguna tidak ditemukan.');
+            await signOut(auth);
+          }
+        } catch (error) {
+          console.error('Gagal memuat sesi:', error);
+          showToast('error', 'Login berhasil, tetapi profil D1 gagal dimuat: ' + error.message);
+          await signOut(auth);
+        }
+      } else {
+        currentUser = null; currentProfile = null;
+        Cache.karyawan = null; Cache.stok = null; Cache.stokTs = null; Cache.akunList = null;
+        Cache.invalidateRekap(); Cache.invalidateCuti(); Cache.invalidateLog();
+        stopIdleWatcher();
+        showLoginScreen();
+      }
+    });
+
+    // ── RENDER FOR ROLE ───────────────────────────────────────────
+    function renderForRole() {
+      hideEl('login-screen'); showEl('app-screen');
+      const isAdmin = currentProfile.role === 'admin';
+      placeInventarisNav(isAdmin);
+
+      if (isAdmin) {
+        showEl('nav-absensi'); showEl('nav-rekap'); showEl('nav-rekap-gaji');
+        showEl('nav-cuti'); showEl('nav-statuscuti');
+        showEl('nav-inv-wd'); showEl('nav-inv-stok'); showEl('nav-inv-kalkulator');
+        showEl('nav-kelola');
+        showEl('nav-ganti-password'); showEl('nav-log-barang');
+        showEl('nav-kelola-item-inv'); // NEW: admin nav item
+        showEl('absensi-select-wrap'); hideEl('absensi-self-info');
+        ['rekap-filter-nama-wrap','gaji-filter-nama-wrap','statuscuti-filter-nama-wrap'].forEach(showEl);
+        document.querySelectorAll('.admin-only-gaji').forEach(el=>el.style.display='');
+        const adminSec = document.getElementById('section-admin-nav');
+        if (adminSec) adminSec.style.display = '';
+        showPage('rekap');
+      } else {
+        showEl('nav-absensi'); showEl('nav-rekap'); showEl('nav-rekap-gaji');
+        showEl('nav-cuti'); showEl('nav-statuscuti');
+        showEl('nav-inv-wd'); showEl('nav-inv-stok'); showEl('nav-inv-kalkulator');
+        hideEl('nav-kelola');
+        showEl('nav-ganti-password'); hideEl('nav-log-barang');
+        hideEl('nav-kelola-item-inv'); // hidden for staff
+        const adminSec = document.getElementById('section-admin-nav');
+        if (adminSec) adminSec.style.display = 'none';
+        hideEl('absensi-select-wrap'); showEl('absensi-self-info');
+        document.getElementById('self-nama').textContent    = currentProfile.nama     || '-';
+        document.getElementById('self-jabatan').textContent = currentProfile.jabatan  || '-';
+        document.getElementById('self-id').textContent      = currentProfile.id_karyawan || '-';
+        showPage('absensi');
+      }
+
+      document.getElementById('user-display-name').textContent = currentProfile.nama || currentUser.email;
+      document.getElementById('user-role-badge').textContent   = isAdmin ? 'Admin' : 'Karyawan';
+      if (window.initializeOperationalPages) window.initializeOperationalPages();
+
+      if (!isAdmin) {
+        const wrap = document.getElementById('rekap-filter-nama-wrap');
+        if (wrap) wrap.style.display = 'none';
+        const gWrap = document.getElementById('gaji-filter-nama-wrap');
+        if (gWrap) gWrap.style.display = 'none';
+        const scWrap = document.getElementById('statuscuti-filter-nama-wrap');
+        if (scWrap) scWrap.style.display = 'none';
+        document.querySelectorAll('.admin-only-gaji').forEach(el => el.style.display = 'none');
+      }
+    }
+
+    function placeInventarisNav(isAdmin) {
+      const section   = document.getElementById('section-inventaris-nav');
+      const items     = document.getElementById('inventaris-nav-items');
+      const staffSlot = document.getElementById('inventaris-nav-slot');
+      const adminSlot = document.getElementById('admin-inventaris-nav-slot');
+      if (!section||!items||!staffSlot||!adminSlot) return;
+      section.style.display = '';
+      staffSlot.appendChild(items);
+    }
+
+    // ── LOGIN ─────────────────────────────────────────────────────
+    function normalizeCompanyEmail(raw) {
+      const v = (raw||'').trim().toLowerCase();
+      return v.includes('@') ? v : `${v}@mangkuresto.id`;
+    }
+
+    function updateEmailAssist(inputId, suffixId, previewId) {
+      const input = document.getElementById(inputId);
+      const raw = input?.value.trim() || '';
+      const showSuffix = !!raw && !raw.includes('@');
+      const suffix  = document.getElementById(suffixId);
+      const preview = document.getElementById(previewId);
+      if (suffix)  suffix.style.display = showSuffix ? 'flex' : 'none';
+      if (preview) preview.textContent  = raw ? `-> ${normalizeCompanyEmail(raw)}` : '';
+    }
+
+    window.handleLoginEmailInput = function() { updateEmailAssist('login-email','login-email-suffix','login-email-preview'); };
+
+    window.doLogin = async function() {
+      const btn = document.getElementById('btn-login');
+      runAction(btn, async () => {
+        const email = normalizeCompanyEmail(document.getElementById('login-email').value);
+        const pass  = document.getElementById('login-pass').value;
+        if (!email || !pass) { showToast('warning','Email dan password wajib diisi.'); return; }
+        try {
+          await signInWithEmailAndPassword(auth, email, pass);
+        } catch(e) {
+          let msg = 'Username / Password yang Anda masukan salah';
+          if (e.code==='auth/user-not-found')    msg = 'Akun tidak ditemukan.';
+          else if (e.code==='auth/too-many-requests') msg = 'Terlalu banyak percobaan. Coba lagi nanti.';
+          else if (e.code==='auth/invalid-email')     msg = 'Format email tidak valid.';
+          showToast('error', msg);
+          const card = document.querySelector('.login-card');
+          card.classList.add('shake');
+          setTimeout(() => card.classList.remove('shake'), 500);
+        }
+      }, '<i class="fas fa-sign-in-alt"></i> Masuk');
+    };
+
+    window.doLogout = async function() {
+      localStorage.removeItem(KARYAWAN_LS_KEY);
+      localStorage.removeItem(KARYAWAN_LS_TS_KEY);
+      localStorage.removeItem(SESSION_LS_KEY);
+      await signOut(auth);
+      showToast('info','Berhasil Keluar.');
+    };
+
+    window.togglePassVis = function(inputId, btnEl) {
+      const inp = document.getElementById(inputId);
+      if (!inp) return;
+      const isPass = inp.type === 'password';
+      inp.type = isPass ? 'text' : 'password';
+      btnEl.querySelector('i').className = isPass ? 'fas fa-eye-slash text-sm' : 'fas fa-eye text-sm';
+      btnEl.classList.remove('click-pop'); void btnEl.offsetWidth; btnEl.classList.add('click-pop');
+    };
+
+    // ── LOAD KARYAWAN ─────────────────────────────────────────────
+    function get7DaysAgoStr() {
+      const d = new Date(); d.setDate(d.getDate()-7);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
+    function initializeFilterTanggal() {
+      const dari = get7DaysAgoStr(), sampai = getLocalDateStr();
+      ['rekap-dari','gaji-dari','statuscuti-dari'].forEach(id=>{ const el=document.getElementById(id); if(el&&!el.value) el.value=dari; });
+      ['rekap-sampai','gaji-sampai','statuscuti-sampai'].forEach(id=>{ const el=document.getElementById(id); if(el&&!el.value) el.value=sampai; });
+    }
+
+    async function loadKaryawan() {
+      try {
+        const lsData = localStorage.getItem(KARYAWAN_LS_KEY);
+        const lsTs   = localStorage.getItem(KARYAWAN_LS_TS_KEY);
+        if (lsData && lsTs && (Date.now()-parseInt(lsTs)) < KARYAWAN_CACHE_TTL) {
+          karyawanList = JSON.parse(lsData); Cache.karyawan = karyawanList;
+          populateDropdowns(); return;
+        }
+      } catch(e) {}
+      if (Cache.karyawan) { karyawanList = Cache.karyawan; populateDropdowns(); return; }
+      try {
+        const snap = await getDocs(query(collection(db,'karyawan'), limit(50)));
+        karyawanList = snap.docs.map(d=>({id:d.id,...d.data()}));
+        Cache.karyawan = karyawanList;
+        localStorage.setItem(KARYAWAN_LS_KEY, JSON.stringify(karyawanList));
+        localStorage.setItem(KARYAWAN_LS_TS_KEY, Date.now().toString());
+        populateDropdowns();
+      } catch(e) { showToast('error','Gagal Memuat Data Karyawan.'); }
+    }
+
+    function populateDropdowns() {
+      const isAdmin = currentProfile.role === 'admin';
+      const sel = document.getElementById('select-nama');
+      if (sel) {
+        sel.innerHTML = '<option value="" disabled selected>-- Pilih Nama --</option>';
+        karyawanList.forEach(k => {
+          const o = document.createElement('option');
+          o.value = k.id_karyawan; o.textContent = k.nama;
+          o.dataset.id = k.id_karyawan; o.dataset.nama = k.nama;
+          o.dataset.jabatan = k.jabatan; o.dataset.docId = k.id;
+          sel.appendChild(o);
+        });
+        sel.onchange = function() {
+          const o = this.options[this.selectedIndex];
+          document.getElementById('input-id').value      = o.dataset.id;
+          document.getElementById('input-jabatan').value = o.dataset.jabatan;
+          document.getElementById('btn-clock-in').disabled  = false;
+          document.getElementById('btn-clock-out').disabled = false;
+        };
+      }
+      ['rekap-filter-nama','statuscuti-filter-nama','gaji-filter-nama','cuti-select-nama'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const isFilter = id !== 'cuti-select-nama';
+        el.innerHTML = isFilter ? '<option value="">Semua Karyawan</option>' : '<option value="" disabled selected>-- Pilih Nama --</option>';
+        const list = isAdmin ? karyawanList : karyawanList.filter(k=>k.id_karyawan===currentProfile.id_karyawan);
+        list.forEach(k => {
+          const o = document.createElement('option');
+          o.value = isFilter ? k.nama : k.id_karyawan; o.textContent = k.nama;
+          o.dataset.id = k.id_karyawan; o.dataset.nama = k.nama; o.dataset.jabatan = k.jabatan;
+          el.appendChild(o);
+        });
+      });
+      const cutiSel = document.getElementById('cuti-select-nama');
+      if (cutiSel) {
+        if (!isAdmin) {
+          const selfOpt = Array.from(cutiSel.options).find(o=>o.dataset.id===currentProfile.id_karyawan);
+          if (selfOpt) { cutiSel.value = currentProfile.id_karyawan; onCutiNamaChange(); cutiSel.disabled = true; }
+        } else { cutiSel.disabled = false; cutiSel.onchange = onCutiNamaChange; }
+      }
+      if (!isAdmin) {
+        const rn = document.getElementById('rekap-filter-nama');
+        if (rn) rn.value = currentProfile.nama;
+        const gn = document.getElementById('gaji-filter-nama');
+        if (gn) gn.value = currentProfile.nama;
+      }
+      initializeFilterTanggal();
+    }
+
+    function onCutiNamaChange() {
+      const sel = document.getElementById('cuti-select-nama');
+      const opt = sel.options[sel.selectedIndex];
+      document.getElementById('cuti-id').value      = opt.dataset.id      || '';
+      document.getElementById('cuti-jabatan').value = opt.dataset.jabatan || '';
+    }
+    window.onCutiNamaChange = onCutiNamaChange;
+
+    // ══════════════════════════════════════════════════════════════
+    // CLOCK IN / OUT
+    // ══════════════════════════════════════════════════════════════
+    window.handleClockIn = function() {
+      const btn = document.getElementById('btn-clock-in');
+      runAction(btn, async () => {
+        const payload = getAbsensiPayload(); if (!payload) return;
+        await submitAttendance('clockIn', payload);
+      }, btn.innerHTML);
+    };
+    window.handleClockOut = function() {
+      const btn = document.getElementById('btn-clock-out');
+      runAction(btn, async () => {
+        const payload = getAbsensiPayload(); if (!payload) return;
+        await submitAttendance('clockOut', payload);
+      }, btn.innerHTML);
+    };
+
+    function getAbsensiPayload() {
+      return {
+        id_karyawan: currentProfile.id_karyawan,
+        nama       : currentProfile.nama,
+        jabatan    : currentProfile.jabatan
+      };
+    }
+
+    async function submitAttendance(action, payload) {
+      try {
+        const result=await apiRequest('/api/attendance',{method:'POST',body:JSON.stringify({action})});
+        const now=new Date(result.clock_in||result.clock_out||Date.now());
+        if(action==='clockIn'){
+          lastOpenSessionId=result.id;localStorage.setItem(SESSION_LS_KEY,result.id);
+          Cache.invalidateRekap();
+          showToast('success','Clock In Berhasil Pada '+formatTime(now));
+          discordAbsensi('clockIn', payload.nama, payload.jabatan, payload.id_karyawan, now);
+        }else{
+          lastOpenSessionId = null; localStorage.removeItem(SESSION_LS_KEY);
+          Cache.invalidateRekap(); Cache._gaji = {};
+          const h=Math.floor(result.total_menit/60),m=result.total_menit%60;
+          showToast('success',`Clock Out Berhasil. Total: ${h}j ${m}m`);
+          discordAbsensi('clockOut', payload.nama, payload.jabatan, payload.id_karyawan, now);
+        }
+      } catch(e) {
+        playSound('error');
+        showToast('error','Gagal: '+e.message);
+      }
+    }
+
+    // ── REKAP ABSENSI ─────────────────────────────────────────────
+    async function _execLoadRekap() {
+      if (_loadingRekap) return;
+      const isAdmin = currentProfile.role === 'admin';
+      const nama   = isAdmin ? document.getElementById('rekap-filter-nama').value : currentProfile.nama;
+      let dari     = document.getElementById('rekap-dari').value;
+      let sampai   = document.getElementById('rekap-sampai').value;
+      if (isAdmin && !nama && !dari && !sampai) {
+        dari = get7DaysAgoStr(); sampai = getLocalDateStr();
+        document.getElementById('rekap-dari').value   = dari;
+        document.getElementById('rekap-sampai').value = sampai;
+      }
+      if (isAdmin && !nama && !dari && !sampai) {
+        showToast('warning','Pilih Nama Karyawan Atau Rentang Tanggal.'); return;
+      }
+      const cacheKey = `rekap|${nama}|${dari}|${sampai}`;
+      const cached   = Cache.getRekap(cacheKey);
+      if (cached) {
+        renderRekapTable(cached); updateRekapStats(cached);
+        document.getElementById('rekap-count-label').textContent = cached.length+' Data Ditemukan (Cache)'; return;
+      }
+      _loadingRekap = true; showEl('rekap-loading');
+      document.getElementById('rekap-tbody').innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-400">Memuat Data...</td></tr>';
+      try {
+        let snap;
+        if (!isAdmin) {
+          snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',currentProfile.id_karyawan), limit(100)));
+        } else if (nama) {
+          snap = await getDocs(query(collection(db,'absensi'), where('nama','==',nama)));
+        } else if (dari && sampai) {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), where('tanggal','<=',sampai), limit(200)));
+        } else if (dari) {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), limit(200)));
+        } else {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','<=',sampai), limit(200)));
+        }
+        let data = snap.docs.map(d=>({id:d.id,...d.data()}));
+        if (!isAdmin) { const b=get7DaysAgoStr(); data=data.filter(r=>r.tanggal>=b); }
+        if (dari && nama)   data = data.filter(r=>r.tanggal>=dari);
+        if (sampai && nama) data = data.filter(r=>r.tanggal<=sampai);
+        data.sort((a,b)=>b.tanggal.localeCompare(a.tanggal));
+        Cache.setRekap(cacheKey, data);
+        renderRekapTable(data); updateRekapStats(data);
+      } catch(e) {
+        document.getElementById('rekap-tbody').innerHTML = `<tr><td colspan="8" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`;
+      } finally { _loadingRekap=false; hideEl('rekap-loading'); }
+    }
+
+    window.loadRekap = async function() {
+      const btn = document.getElementById('btn-rekap-tampilkan');
+      if (btn) await runAction(btn, _execLoadRekap);
+      else await _execLoadRekap();
+    };
+
+    window.resetRekap = function() {
+      document.getElementById('rekap-dari').value   = get7DaysAgoStr();
+      document.getElementById('rekap-sampai').value = getLocalDateStr();
+      const rn = document.getElementById('rekap-filter-nama'); if (rn) rn.value='';
+      document.getElementById('rekap-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-slate-400 py-12"><div class="flex flex-col items-center gap-2"><i class="fas fa-table text-3xl text-slate-200"></i><span class="text-sm font-medium">Gunakan filter di atas untuk menampilkan data</span></div></td></tr>';
+      ['stat-total-hadir','stat-total-jam','stat-avg-jam','stat-jumlah-karyawan'].forEach(id=>document.getElementById(id).textContent='—');
+      document.getElementById('rekap-count-label').textContent = 'Belum dimuat';
+    };
+
+    function renderRekapTable(data) {
+      const tbody   = document.getElementById('rekap-tbody');
+      const isAdmin = currentProfile.role === 'admin';
+      document.getElementById('rekap-count-label').textContent = data.length+' data ditemukan';
+      if (!data.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center py-12 text-slate-400"><i class="fas fa-inbox text-3xl text-slate-200 block mb-2"></i>Tidak ada data</td></tr>'; return;
+      }
+      const grouped = {};
+      data.forEach(row => { const t=row.tanggal||'-'; if(!grouped[t]) grouped[t]=[]; grouped[t].push(row); });
+      let html='', no=1;
+      Object.keys(grouped).sort((a,b)=>b.localeCompare(a)).forEach(tgl => {
+        const rows=grouped[tgl]; let dayMin=0;
+        rows.forEach(row => {
+          dayMin += row.total_menit||0;
+          const ciTime = row.clock_in  ? formatTime(new Date(row.clock_in))  : '-';
+          const coTime = row.clock_out ? formatTime(new Date(row.clock_out)) : '<span class="text-slate-400">Belum</span>';
+          const jamStr = row.total_menit ? menit2str(row.total_menit) : (row.clock_out?'-':'<span class="text-amber-500">On Shift</span>');
+          html += `<tr>
+            <td class="text-slate-400 font-semibold">${no++}</td>
+            <td class="font-semibold text-slate-700">${row.tanggal||'-'}</td>
+            <td class="text-slate-500 font-mono text-xs">${row.id_karyawan||'-'}</td>
+            <td class="font-semibold text-slate-900">${row.nama||'-'}</td>
+            <td class="text-slate-500">${row.jabatan||'-'}</td>
+            <td><span class="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700">${ciTime}</span></td>
+            <td><span class="inline-flex items-center gap-1.5 rounded-lg bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700">${coTime}</span></td>
+            <td><div class="flex items-center justify-between gap-2"><span class="font-black text-teal-700">${jamStr}</span>${isAdmin?`<button onclick="openEditAbsensi('${row.id}','${row.clock_in||''}','${row.clock_out||''}')" class="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-bold text-blue-500 hover:bg-blue-50 hover:text-blue-700" title="Edit jam"><i class="fas fa-pen text-[10px]"></i> Edit</button>`:''}</div></td>
+          </tr>`;
+        });
+        const dH=Math.floor(dayMin/60),dM=dayMin%60;
+        html+=`<tr style="background:#f0fdf4;border-top:2px solid #86efac;">
+          <td colspan="7" style="padding:10px 16px;"><span style="display:inline-flex;align-items:center;gap:6px;background:#dcfce7;color:#166534;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;"><i class="fas fa-calendar-check" style="font-size:9px;"></i> Total ${tgl} — ${rows.length} sesi</span></td>
+          <td style="padding:10px 16px;"><span style="font-weight:900;color:#15803d;font-size:14px;">${dH}j ${dM}m</span></td>
+        </tr>`;
+      });
+      tbody.innerHTML = html;
+    }
+
+    function updateRekapStats(data) {
+      const total=data.length, unique=new Set(data.map(d=>d.id_karyawan)).size;
+      let totalMin=0; data.forEach(r=>{ totalMin+=r.total_menit||0; });
+      const avgMin = total>0 ? Math.round(totalMin/total) : 0;
+      document.getElementById('stat-total-hadir').textContent     = total;
+      document.getElementById('stat-total-jam').textContent       = totalMin>0?menit2str(totalMin):'—';
+      document.getElementById('stat-avg-jam').textContent         = avgMin>0?menit2str(avgMin):'—';
+      document.getElementById('stat-jumlah-karyawan').textContent = unique;
+    }
+
+    // ── EDIT ABSENSI ──────────────────────────────────────────────
+    window.openEditAbsensi = function(docId, clockIn, clockOut) {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      document.getElementById('edit-doc-id').value = docId;
+      const toLocal = iso => {
+        if (!iso) return '';
+        const d=new Date(iso), pad=n=>String(n).padStart(2,'0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+      document.getElementById('edit-clock-in').value  = toLocal(clockIn);
+      document.getElementById('edit-clock-out').value = toLocal(clockOut);
+      showEl('edit-modal');
+    };
+    window.closeEditModal = function() { hideEl('edit-modal'); };
+
+    window.saveEditAbsensi = async function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      const docId = document.getElementById('edit-doc-id').value;
+      const ciVal = document.getElementById('edit-clock-in').value;
+      const coVal = document.getElementById('edit-clock-out').value;
+      if (!ciVal) { showToast('warning','Clock In wajib diisi.'); return; }
+      const ciDate = new Date(ciVal);
+      let updateData = { clock_in: ciDate.toISOString() };
+      if (coVal) {
+        const coDate = new Date(coVal);
+        const totalMenit = Math.round((coDate-ciDate)/60000);
+        if (totalMenit<0) { showToast('error','Clock Out tidak boleh sebelum Clock In.'); return; }
+        updateData.clock_out = coDate.toISOString(); updateData.total_menit = totalMenit;
+      } else { updateData.clock_out = null; updateData.total_menit = null; }
+      try {
+        await updateDoc(doc(db,'absensi',docId), updateData);
+        Cache.invalidateRekap(); Cache._gaji={};
+        showToast('success','Data absensi berhasil diperbarui.');
+        hideEl('edit-modal'); loadRekap();
+      } catch(e) { showToast('error','Gagal: '+e.message); }
+    };
+
+    window.deleteAbsensi = function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      const docId = document.getElementById('edit-doc-id').value;
+      if (!docId) return;
+      hideEl('edit-modal');
+      window.openActionConfirm({
+        title:'Hapus Absensi Ini?', message:'Data absensi ini akan dihapus permanen.',
+        confirmText:'Ya, Hapus', variant:'danger',
+        onConfirm: async () => {
+          await deleteDoc(doc(db,'absensi',docId));
+          Cache.invalidateRekap(); Cache._gaji={};
+          showToast('success','Data absensi berhasil dihapus.'); loadRekap();
+        }
+      });
+    };
+
+    // ── REKAP GAJI ────────────────────────────────────────────────
+    async function _execLoadRekapGaji() {
+      if (_loadingGaji) return;
+      const isAdmin    = currentProfile.role === 'admin';
+      const filterNama = isAdmin ? document.getElementById('gaji-filter-nama').value : currentProfile.nama;
+      const dari       = document.getElementById('gaji-dari').value;
+      const sampai     = document.getElementById('gaji-sampai').value;
+      if (isAdmin && !filterNama && !dari && !sampai) { showToast('warning','Pilih Nama Atau Rentang Tanggal.'); return; }
+      const cacheKey = `gaji|${filterNama}|${dari}|${sampai}`;
+      const cached   = Cache.getGaji(cacheKey);
+      if (cached) {
+        gajiCurrentData=cached; renderGajiTable(gajiCurrentData); updateGajiStats(gajiCurrentData, isAdmin);
+        if (isAdmin) renderGajiTextbox(gajiCurrentData, dari, sampai);
+        document.getElementById('gaji-count-label').textContent = gajiCurrentData.length+' Karyawan (Cache)'; return;
+      }
+      _loadingGaji=true; showEl('gaji-loading');
+      document.getElementById('gaji-tbody').innerHTML = '<tr><td colspan="9" class="text-center py-8 text-slate-400">Memuat...</td></tr>';
+      try {
+        let snap;
+        if (!isAdmin) {
+          snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',currentProfile.id_karyawan), limit(100)));
+        } else if (filterNama) {
+          snap = await getDocs(query(collection(db,'absensi'), where('nama','==',filterNama)));
+        } else if (dari && sampai) {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), where('tanggal','<=',sampai), limit(200)));
+        } else if (dari) {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), limit(200)));
+        } else {
+          snap = await getDocs(query(collection(db,'absensi'), where('tanggal','<=',sampai), limit(200)));
+        }
+        let absensiData = snap.docs.map(d=>d.data()).filter(d=>d.clock_out);
+        if (!isAdmin) { const b=get7DaysAgoStr(); absensiData=absensiData.filter(r=>r.tanggal>=b); }
+        if (dari && filterNama)   absensiData = absensiData.filter(r=>r.tanggal>=dari);
+        if (sampai && filterNama) absensiData = absensiData.filter(r=>r.tanggal<=sampai);
+        const map={};
+        absensiData.forEach(row => {
+          const key=row.id_karyawan||row.nama;
+          if (!map[key]) map[key]={id_karyawan:row.id_karyawan, nama:row.nama, jabatan:row.jabatan, totalMenit:0, sesi:0};
+          map[key].totalMenit+=row.total_menit||0; map[key].sesi++;
+        });
+        const rows=Object.values(map).sort((a,b)=>a.nama.localeCompare(b.nama));
+        gajiDoneState={};
+        gajiCurrentData=rows.map((r,i)=>{
+          const result=hitungGaji(r.jabatan, r.totalMenit);
+          const isOwner=['OWNER','BOSS'].includes((r.jabatan||'').toUpperCase());
+          return {no:i+1,...r, gaji:result?.gaji??null, keterangan:result?.keterangan??(isOwner?'OWNER':'Jabatan Tidak Dikenal'), isOwner, isUnknown:!isOwner&&!result};
+        });
+        Cache.setGaji(cacheKey, gajiCurrentData);
+        renderGajiTable(gajiCurrentData); updateGajiStats(gajiCurrentData, isAdmin);
+        if (isAdmin) renderGajiTextbox(gajiCurrentData, dari, sampai);
+        document.getElementById('gaji-count-label').textContent = gajiCurrentData.length+' Karyawan';
+      } catch(e) {
+        document.getElementById('gaji-tbody').innerHTML = `<tr><td colspan="9" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`;
+      } finally { _loadingGaji=false; hideEl('gaji-loading'); }
+    }
+
+    window.loadRekapGaji = async function() {
+      const btn = document.getElementById('btn-gaji-hitung');
+      if (btn) await runAction(btn, _execLoadRekapGaji);
+      else await _execLoadRekapGaji();
+    };
+
+    function hitungGaji(jabatan, totalMenit) {
+      const ju=(jabatan||'').toUpperCase(); if(['OWNER','BOSS'].includes(ju)) return null;
+      const rk=Object.keys(SALARY_RATES).find(k=>k.toUpperCase()===ju); if(!rk) return null;
+      const rate=SALARY_RATES[rk], threshold=OVERTIME_THRESHOLD_JAM*60;
+      if (totalMenit<=threshold) {
+        const gaji=Math.round((totalMenit/threshold)*rate.gaji_24_jam);
+        return { gaji, keterangan:`${Math.floor(totalMenit/60)}j ${totalMenit%60}m dari tarif 24 jam Rp${rate.gaji_24_jam.toLocaleString('id-ID')}` };
+      }
+      const normalPay=rate.gaji_24_jam, overtimeMnt=totalMenit-threshold;
+      return { gaji:normalPay+Math.ceil(overtimeMnt/60)*OVERTIME_RATE_PER_JAM, keterangan:`24j normal + ${overtimeMnt}m overtime @Rp50k/jam` };
+    }
+
+    function renderGajiTable(rows) {
+      const tbody=document.getElementById('gaji-tbody'), isAdmin=currentProfile.role==='admin';
+      if (!rows.length) { tbody.innerHTML='<tr><td colspan="9" class="text-center py-12 text-slate-400"><i class="fas fa-inbox text-3xl text-slate-200 block mb-2"></i>Tidak ada data</td></tr>'; return; }
+      tbody.innerHTML=rows.map((row,i)=>{
+        const isDone=gajiDoneState[row.nama]||false;
+        const totalH=Math.floor(row.totalMenit/60), totalM=row.totalMenit%60;
+        const gajiStr=row.isOwner||row.isUnknown?'<span class="text-slate-400 italic text-xs">Tidak tersedia</span>':'Rp '+row.gaji.toLocaleString('id-ID');
+        const rk=Object.keys(SALARY_RATES).find(k=>k.toUpperCase()===(row.jabatan||'').toUpperCase());
+        const rateStr=rk?'Rp '+SALARY_RATES[rk].gaji_24_jam.toLocaleString('id-ID')+'/24 jam':'-';
+        const doneCol=isAdmin?`<td class="text-center"><div class="done-toggle ${isDone?'checked':''} mx-auto" onclick="toggleGajiDone(${i})">${isDone?'<i class="fas fa-check text-xs"></i>':''}</div></td>`:'';
+        return `<tr id="gaji-row-${i}" class="${isDone?'gaji-row-done':''}">
+          <td class="text-slate-400 font-semibold">${i+1}</td>
+          <td class="font-semibold text-slate-900">${row.nama}</td>
+          <td><span class="inline-flex items-center rounded-lg bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">${row.jabatan||'-'}</span></td>
+          <td class="text-slate-600 font-semibold">${row.sesi} sesi</td>
+          <td class="font-black text-teal-700">${totalH}j ${totalM}m</td>
+          <td class="text-slate-500 text-xs">${rateStr}</td>
+          <td class="text-slate-400 text-xs max-w-[180px]"><span class="block truncate" title="${row.keterangan}">${row.keterangan}</span></td>
+          <td class="font-black text-emerald-700 text-sm">${gajiStr}</td>
+          ${doneCol}
+        </tr>`;
+      }).join('');
+    }
+
+    window.toggleGajiDone = function(index) {
+      const row=gajiCurrentData[index]; gajiDoneState[row.nama]=!gajiDoneState[row.nama];
+      const tr=document.getElementById('gaji-row-'+index), toggle=tr.querySelector('.done-toggle');
+      if (gajiDoneState[row.nama]) { tr.classList.add('gaji-row-done'); toggle.classList.add('checked'); toggle.innerHTML='<i class="fas fa-check text-xs"></i>'; }
+      else { tr.classList.remove('gaji-row-done'); toggle.classList.remove('checked'); toggle.innerHTML=''; }
+      renderGajiTextbox(gajiCurrentData, document.getElementById('gaji-dari').value, document.getElementById('gaji-sampai').value);
+    };
+
+    function updateGajiStats(rows, isAdmin) {
+      let totalMin=0, totalGaji=0;
+      rows.forEach(r=>{ totalMin+=r.totalMenit; if(r.gaji) totalGaji+=r.gaji; });
+      const ke=document.getElementById('gaji-stat-karyawan'); if(ke) ke.textContent=rows.length;
+      document.getElementById('gaji-stat-jam').textContent   = totalMin>0?menit2str(totalMin):'—';
+      document.getElementById('gaji-stat-total').textContent = totalGaji>0?'Rp '+totalGaji.toLocaleString('id-ID'):'—';
+    }
+
+    function renderGajiTextbox(rows, dari, sampai) {
+      const tb=document.getElementById('gaji-textbox'); if(!tb) return;
+      if (!rows.length) { tb.value=''; return; }
+      const periode=formatPeriode(dari, sampai);
+      const built=rows.map((row,i)=>({
+        col1:`${i+1}. ${row.nama} - ${row.jabatan}`,
+        col2:`(${Math.floor(row.totalMenit/60)} Jam ${row.totalMenit%60} Menit)`,
+        col3:(row.isOwner||row.isUnknown)?'Rp. -':`Rp. ${row.gaji.toLocaleString('id-ID')}`,
+        done:gajiDoneState[row.nama]||false
+      }));
+      const m1=Math.max(...built.map(b=>b.col1.length));
+      const m2=Math.max(...built.map(b=>b.col2.length));
+      const m3=Math.max(...built.map(b=>b.col3.length));
+      tb.value=['#',`REKAP GAJI PERIODE ${periode}`,'','```',
+        ...built.map(b=>`${b.col1.padEnd(m1)}   ${b.col2.padEnd(m2)}   ${b.col3.padEnd(m3)}${b.done?'   | DONE ✅':''}`),
+        '```'].join('\n');
+    }
+
+    window.resetRekapGaji = function() {
+      document.getElementById('gaji-dari').value=get7DaysAgoStr(); document.getElementById('gaji-sampai').value=getLocalDateStr();
+      const gfn=document.getElementById('gaji-filter-nama'); if(gfn) gfn.value='';
+      gajiDoneState={}; gajiCurrentData=[];
+      document.getElementById('gaji-tbody').innerHTML='<tr><td colspan="9" class="text-center text-slate-400 py-12"><i class="fas fa-money-bill-wave text-3xl text-slate-200 block mb-2"></i>Pilih periode dan tekan Hitung Gaji</td></tr>';
+      ['gaji-stat-jam','gaji-stat-total'].forEach(id=>document.getElementById(id).textContent='—');
+      const ks=document.getElementById('gaji-stat-karyawan'); if(ks) ks.textContent='—';
+      document.getElementById('gaji-count-label').textContent='Belum dimuat';
+      const tb=document.getElementById('gaji-textbox'); if(tb) tb.value='';
+    };
+
+    window.copyGajiText = function() {
+      const tb=document.getElementById('gaji-textbox');
+      if (!tb||!tb.value) { showToast('warning','Belum ada data.'); return; }
+      navigator.clipboard.writeText(tb.value)
+        .then(()=>showToast('success','✅ Teks berhasil disalin!'))
+        .catch(()=>{ tb.select(); document.execCommand('copy'); showToast('success','✅ Disalin!'); });
+    };
+
+    // ── IMPORT ABSENSI JSON ───────────────────────────────────────
+    window.submitImportAbsensi = async function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      const btn=document.getElementById('btn-import-absensi');
+      runAction(btn, async () => {
+        const rawText=document.getElementById('import-absensi-json').value.trim();
+        if (!rawText) { showToast('warning','JSON kosong.'); return; }
+        let rows;
+        try { rows=JSON.parse(rawText); if(!Array.isArray(rows)) throw new Error('Harus berupa array.'); }
+        catch(e) { showToast('error','Format JSON tidak valid: '+e.message); return; }
+        const resultEl=document.getElementById('import-absensi-result'); resultEl.style.display='none';
+        let success=0, failed=0, errors=[];
+        for (let i=0;i<rows.length;i++) {
+          const row=rows[i];
+          try {
+            let tanggalISO='';
+            if (row.tanggal) { const p=row.tanggal.split('/'); tanggalISO=p.length===3?`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`:row.tanggal; }
+            const buildISO=(t,ts)=>(!t||!ts)?null:new Date(`${t}T${ts}`).toISOString();
+            const clockInISO=buildISO(tanggalISO, row.clock_in);
+            const clockOutISO=buildISO(tanggalISO, row.clock_out);
+            let totalMenit=null;
+            if (row.total_jam) { const p=row.total_jam.split(':'); if(p.length>=2) totalMenit=parseInt(p[0])*60+parseInt(p[1]); }
+            else if (clockInISO&&clockOutISO) totalMenit=Math.round((new Date(clockOutISO)-new Date(clockInISO))/60000);
+            await addDoc(collection(db,'absensi'),{ tanggal:tanggalISO, id_karyawan:row.id_karyawan||'', nama:row.nama||'', jabatan:row.jabatan||'', clock_in:clockInISO, clock_out:clockOutISO, total_menit:totalMenit, created_at:serverTimestamp() });
+            success++;
+          } catch(e) { failed++; errors.push(`Baris ${i+1} (${row.nama||'?'}): ${e.message}`); }
+        }
+        resultEl.style.display='';
+        const ok=failed===0;
+        resultEl.className=`mt-4 rounded-2xl p-4 text-sm font-medium ${ok?'bg-emerald-50 border border-emerald-200 text-emerald-800':'bg-amber-50 border border-amber-200 text-amber-800'}`;
+        resultEl.innerHTML=`<div class="flex items-center gap-2 font-bold mb-1"><i class="fas ${ok?'fa-circle-check text-emerald-600':'fa-triangle-exclamation text-amber-600'}"></i>Import selesai: ${success} berhasil${failed?`, ${failed} gagal`:''}</div>${errors.length?`<ul class="mt-2 space-y-1 text-xs">${errors.map(e=>`<li class="text-rose-700">• ${e}</li>`).join('')}</ul>`:''}`;
+        if (success>0) { Cache.invalidateRekap(); Cache._gaji={}; showToast('success',`✅ ${success} data berhasil diimport!`); document.getElementById('import-absensi-json').value=''; }
+      }, '<i class="fas fa-upload"></i> Import ke Firestore');
+    };
+
+    window.clearImportJson = function() {
+      document.getElementById('import-absensi-json').value='';
+      const r=document.getElementById('import-absensi-result'); if(r) r.style.display='none';
+    };
+
+    // ── CUTI ──────────────────────────────────────────────────────
+    window.submitCuti = async function() {
+      const btn=document.getElementById('btn-submit-cuti');
+      runAction(btn, async () => {
+        const sel=document.getElementById('cuti-select-nama'), opt=sel.options[sel.selectedIndex];
+        const nama=opt?.dataset?.nama||'', id=document.getElementById('cuti-id').value;
+        const jabatan=document.getElementById('cuti-jabatan').value;
+        const dari=document.getElementById('cuti-dari').value, sampai=document.getElementById('cuti-sampai').value;
+        const jenis=document.getElementById('cuti-jenis').value, alasan=document.getElementById('cuti-alasan').value.trim();
+        if (!nama)          { showToast('warning','Pilih nama karyawan.'); return; }
+        if (!dari||!sampai) { showToast('warning','Tanggal wajib diisi.'); return; }
+        if (!jenis)         { showToast('warning','Pilih jenis izin.'); return; }
+        if (!alasan)        { showToast('warning','Alasan wajib diisi.'); return; }
+        if (sampai<dari)    { showToast('warning','Tanggal selesai tidak boleh sebelum mulai.'); return; }
+        try {
+          await addDoc(collection(db,'cuti'),{ id_karyawan:id, nama, jabatan, jenis_izin:jenis, tanggal_mulai:dari, tanggal_selesai:sampai, alasan, status:'Pending', catatan:'', tgl_pengajuan:new Date().toISOString(), created_at:serverTimestamp() });
+          sendToDiscord('cuti',{
+            content:'<@618790376836169753>',allowed_mentions:{users:['618790376836169753']},
+            embeds:[{author:{name:'📋 Pengajuan Cuti • Mangku Resto'},title:'⚠️ Cuti Baru — Mohon Ditindaklanjuti',description:`**${nama}** telah mengajukan **${jenis}**.`,color:16766720,fields:[{name:'👤 Karyawan',value:`${nama}\n${id||'-'} • ${jabatan||'-'}`,inline:true},{name:'📅 Periode',value:`${dari} s/d ${sampai}`,inline:true},{name:'📝 Alasan',value:alasan}],footer:{text:'Sistem Pengajuan Cuti • Mangku Resto'},timestamp:new Date().toISOString()}]
+          });
+          Cache.invalidateCuti(); playSound('success'); showToast('success','✅ Pengajuan terkirim!');
+          document.getElementById('cuti-select-nama').selectedIndex=0;
+          ['cuti-id','cuti-jabatan','cuti-dari','cuti-sampai','cuti-alasan'].forEach(id=>document.getElementById(id).value='');
+          document.getElementById('cuti-jenis').selectedIndex=0;
+          if (currentProfile.role==='staff') onCutiNamaChange();
+        } catch(e) { playSound('error'); showToast('error','Gagal: '+e.message); }
+      }, '<i class="fas fa-paper-plane text-sm"></i> Kirim Pengajuan');
+    };
+
+    window.loadStatusCuti = async function() {
+      if (_loadingCuti) return;
+      const isAdmin=currentProfile.role==='admin';
+      const nama=isAdmin?document.getElementById('statuscuti-filter-nama').value:'';
+      const status=document.getElementById('statuscuti-filter-status').value;
+      const dari=document.getElementById('statuscuti-dari').value, sampai=document.getElementById('statuscuti-sampai').value;
+      const cacheKey=`cuti|${nama}|${status}|${dari}|${sampai}`;
+      const cached=Cache.getCuti(cacheKey);
+      if (cached) { renderStatusCutiTable(cached); updateCutiStats(cached); document.getElementById('statuscuti-count-label').textContent=cached.length+' pengajuan (cache)'; return; }
+      _loadingCuti=true; showEl('statuscuti-loading');
+      document.getElementById('statuscuti-tbody').innerHTML='<tr><td colspan="9" class="text-center py-8 text-slate-400">Memuat...</td></tr>';
+      try {
+        let snap;
+        if (!isAdmin) { snap=await getDocs(query(collection(db,'cuti'), where('id_karyawan','==',currentProfile.id_karyawan), limit(100))); }
+        else if (nama) { snap=await getDocs(query(collection(db,'cuti'), where('nama','==',nama), limit(200))); }
+        else if (status) { snap=await getDocs(query(collection(db,'cuti'), where('status','==',status), limit(200))); }
+        else { snap=await getDocs(query(collection(db,'cuti'), limit(200))); }
+        let data=snap.docs.map(d=>({id:d.id,...d.data()}));
+        if (status && isAdmin) data=data.filter(r=>r.status===status);
+        if (dari)   data=data.filter(r=>r.tanggal_mulai>=dari);
+        if (sampai) data=data.filter(r=>r.tanggal_mulai<=sampai);
+        data.sort((a,b)=>(b.tanggal_mulai||'').localeCompare(a.tanggal_mulai||''));
+        Cache.setCuti(cacheKey, data); renderStatusCutiTable(data); updateCutiStats(data);
+      } catch(e) {
+        document.getElementById('statuscuti-tbody').innerHTML=`<tr><td colspan="9" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`;
+      } finally { _loadingCuti=false; hideEl('statuscuti-loading'); }
+    };
+
+    function renderStatusCutiTable(data) {
+      const tbody=document.getElementById('statuscuti-tbody'), isAdmin=currentProfile.role==='admin';
+      document.getElementById('statuscuti-count-label').textContent=data.length+' pengajuan ditemukan';
+      if (!data.length) { tbody.innerHTML='<tr><td colspan="9" class="text-center py-12 text-slate-400"><i class="fas fa-calendar text-3xl text-slate-200 block mb-2"></i>Tidak ada data</td></tr>'; return; }
+      const bc=s=>s==='Approved'?'badge-approved':s==='Rejected'?'badge-rejected':'badge-pending';
+      const bi=s=>s==='Approved'?'fa-check-circle':s==='Rejected'?'fa-times-circle':'fa-clock';
+      tbody.innerHTML=data.map((row,i)=>{
+        const tglP=row.tgl_pengajuan?new Date(row.tgl_pengajuan).toLocaleDateString('id-ID'):'-';
+        const adminActions=isAdmin?`<td><div class="flex gap-1 items-center"><button onclick="openEditCuti('${row.id}','${(row.status||'Pending')}','${(row.catatan||'').replace(/'/g,"\\'").replace(/\n/g,' ')}')" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition"><i class="fas fa-pencil text-[10px]"></i> Edit</button></div></td>`:`<td class="text-slate-500 text-xs">${row.catatan||'-'}</td>`;
+        return `<tr><td class="text-slate-400 font-semibold">${i+1}</td><td class="font-semibold text-slate-600 text-xs">${tglP}</td><td class="font-semibold text-slate-900">${row.nama||'-'}</td><td><span class="inline-flex items-center rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700">${row.jenis_izin||'-'}</span></td><td class="text-slate-600 text-xs">${row.tanggal_mulai||'-'}</td><td class="text-slate-600 text-xs">${row.tanggal_selesai||'-'}</td><td class="text-slate-500 max-w-[140px]"><span class="truncate block">${row.alasan||'-'}</span></td><td><span class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-bold ${bc(row.status)}"><i class="fas ${bi(row.status)} text-[10px]"></i>${row.status||'Pending'}</span></td>${adminActions}</tr>`;
+      }).join('');
+    }
+
+    window.openEditCuti = function(docId, currentStatus, currentCatatan) {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      document.getElementById('editcuti-doc-id').value  = docId;
+      document.getElementById('editcuti-status').value  = currentStatus||'Pending';
+      document.getElementById('editcuti-catatan').value = currentCatatan||'';
+      showEl('editcuti-modal');
+    };
+    window.closeEditCutiModal = function() { hideEl('editcuti-modal'); };
+
+    window.saveEditCuti = async function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      const docId=document.getElementById('editcuti-doc-id').value;
+      const status=document.getElementById('editcuti-status').value;
+      const catatan=document.getElementById('editcuti-catatan').value.trim();
+      if (!status) { showToast('warning','Pilih status.'); return; }
+      const btn=document.getElementById('btn-save-editcuti');
+      btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+      try {
+        await updateDoc(doc(db,'cuti',docId),{ status, catatan, tgl_review:new Date().toISOString() });
+        Cache.invalidateCuti(); showToast('success',`Status diubah ke ${status}`);
+        hideEl('editcuti-modal'); loadStatusCuti();
+      } catch(e) { showToast('error','Gagal: '+e.message); }
+      finally { btn.disabled=false; btn.innerHTML='<i class="fas fa-save"></i> Simpan'; }
+    };
+
+    function updateCutiStats(data) {
+      document.getElementById('cuti-stat-pending').textContent  = data.filter(d=>(d.status||'Pending')==='Pending').length;
+      document.getElementById('cuti-stat-approved').textContent = data.filter(d=>d.status==='Approved').length;
+      document.getElementById('cuti-stat-rejected').textContent = data.filter(d=>d.status==='Rejected').length;
+    }
+
+    // ── KELOLA AKUN ───────────────────────────────────────────────
+    async function loadAkunList() {
+      const tbody=document.getElementById('akun-tbody');
+      if (Cache.akunList) { renderAkunTable(Cache.akunList); return; }
+      tbody.innerHTML='<tr><td colspan="6" class="text-center py-8 text-slate-400">Memuat...</td></tr>';
+      try {
+        const snap=await getDocs(query(collection(db,'users'), limit(100)));
+        Cache.akunList=snap.docs.map(d=>({uid:d.id,...d.data()}));
+        renderAkunTable(Cache.akunList);
+      } catch(e) { tbody.innerHTML=`<tr><td colspan="6" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`; }
+    }
+
+    function renderAkunTable(users) {
+      const tbody=document.getElementById('akun-tbody');
+      if (!users.length) { tbody.innerHTML='<tr><td colspan="8" class="text-center py-8 text-slate-400">Belum ada pengguna</td></tr>'; return; }
+      tbody.innerHTML=users.map((u,i)=>`<tr>
+        <td class="text-slate-400 font-semibold">${i+1}</td>
+        <td class="font-semibold text-slate-900">${u.nama||'-'}</td>
+        <td class="text-slate-500 text-sm font-mono">${u.email||'-'}</td>
+        <td><span class="inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold ${u.role==='admin'?'bg-violet-100 text-violet-700':'bg-slate-100 text-slate-600'}">${u.role==='admin'?'Admin':'Karyawan'}</span></td>
+        <td class="text-xs text-slate-500">${u.id_karyawan||'-'}</td>
+        <td><span class="inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold bg-teal-100 text-teal-700">${u.jabatan||'-'}</span></td>
+        <td><div class="flex gap-2">${u.uid!==currentUser.uid?`<button onclick="openEditUser('${u.uid}','${(u.nama||'').replace(/'/g,"\\'")}','${(u.email||'').replace(/'/g,"\\'")}','${(u.jabatan||'').replace(/'/g,"\\'")}')"><span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-all"><i class="fas fa-pencil text-[10px]"></i> Edit</span></button><button onclick="confirmHapusUser('${u.uid}','${(u.nama||'').replace(/'/g,"\\'")}','${u.email||''}')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 transition-all"><i class="fas fa-trash-alt text-[10px]"></i> Hapus</button>`:'<span class="text-xs text-slate-300 italic">Akun Anda</span>'}</div></td>
+      </tr>`).join('');
+    }
+
+    window.openEditUser = function(uid, nama, email, jabatan) {
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      document.getElementById('edit-user-uid').value = uid;
+      document.getElementById('edit-user-nama-input').value = nama || '';
+      document.getElementById('edit-user-email-display').textContent = email || '';
+      document.getElementById('edit-user-jabatan').value = jabatan || '';
+      showEl('edit-user-modal');
+    };
+    window.closeEditUserModal = function() { hideEl('edit-user-modal'); };
+
+    window.saveEditUser = async function() {
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      const uid = document.getElementById('edit-user-uid').value;
+      const nama = document.getElementById('edit-user-nama-input').value.trim();
+      const jabatan = document.getElementById('edit-user-jabatan').value;
+      if (!nama) { showToast('warning','Nama wajib diisi.'); return; }
+      if (!jabatan) { showToast('warning','Pilih jabatan.'); return; }
+      const btn = document.getElementById('btn-save-edit-user');
+      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+      try {
+        // Update users collection
+        await updateDoc(doc(db, 'users', uid), { nama, jabatan });
+        
+        // Get user data to update karyawan collection
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        if (userSnap.exists()) {
+          const userData = userSnap.data();
+          if (userData.id_karyawan) {
+            // Update karyawan collection
+            const karyawanQuery = query(collection(db, 'karyawan'), where('id_karyawan', '==', userData.id_karyawan), limit(1));
+            const karyawanSnap = await getDocs(karyawanQuery);
+            if (!karyawanSnap.empty) {
+              await updateDoc(karyawanSnap.docs[0].ref, { nama, jabatan });
+            }
+          }
+        }
+        
+        // Update cache
+        if (Cache.akunList) {
+          const idx = Cache.akunList.findIndex(u => u.uid === uid);
+          if (idx >= 0) {
+            Cache.akunList[idx].nama = nama;
+            Cache.akunList[idx].jabatan = jabatan;
+          }
+        }
+        if (Cache.karyawan) {
+          const userSnap = await getDoc(doc(db, 'users', uid));
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            if (userData.id_karyawan) {
+              const kIdx = Cache.karyawan.findIndex(k => k.id_karyawan === userData.id_karyawan);
+              if (kIdx >= 0) {
+                Cache.karyawan[kIdx].nama = nama;
+                Cache.karyawan[kIdx].jabatan = jabatan;
+              }
+            }
+          }
+        }
+        
+        // Update local storage
+        localStorage.removeItem(KARYAWAN_LS_KEY);
+        localStorage.removeItem(KARYAWAN_LS_TS_KEY);
+        
+        showToast('success', `✅ Data berhasil diperbarui`);
+        hideEl('edit-user-modal');
+        if (Cache.akunList) renderAkunTable(Cache.akunList);
+        else loadAkunList();
+        
+        // Refresh dropdown lists
+        populateDropdowns();
+      } catch(e) {
+        showToast('error', 'Gagal: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-save"></i> Simpan';
+      }
+    };
+
+    window.confirmHapusUser = function(uid, nama, email) {
+      document.getElementById('confirm-hapus-nama').textContent  = nama;
+      document.getElementById('confirm-hapus-email').textContent = email;
+      document.getElementById('confirm-hapus-uid').value         = uid;
+      showEl('confirm-hapus-modal');
+    };
+    window.closeConfirmHapus = function() { hideEl('confirm-hapus-modal'); };
+
+    async function getSecondaryAuth() {
+      return getAuth(initializeApp(firebaseConfig, 'secondary'));
+    }
+
+    window.buatAkun = async function() {
+      const btn=document.getElementById('btn-buat-akun');
+      runAction(btn, async () => {
+        const nama=document.getElementById('akun-nama').value.trim();
+        const username=document.getElementById('akun-username').value.trim();
+        const role=document.getElementById('akun-role').value;
+        const idKaryawan=document.getElementById('akun-id-karyawan').value.trim();
+        const jabatan=document.getElementById('akun-jabatan').value;
+        if (!nama||!username||!role) { showToast('warning','Nama, Username, Dan Role Wajib Diisi.'); return; }
+        if (!['admin','staff'].includes(role)) { showToast('error','Role tidak valid.'); return; }
+        const email=username.includes('@')?username:username+'@mangkuresto.id';
+        document.getElementById('akun-email-preview').textContent=email;
+        try {
+          const auth2=await getSecondaryAuth();
+          const createUser2=createUserWithEmailAndPassword, signIn2=signInWithEmailAndPassword, signOut2=signOut;
+          let uid, isRecovered=false;
+          try {
+            const cred=await createUser2(auth2, email, 'absen123'); uid=cred.user.uid;
+          } catch(createErr) {
+            if (createErr.code==='auth/email-already-in-use') {
+              try {
+                const cred=await signIn2(auth2, email, 'absen123'); uid=cred.user.uid; isRecovered=true;
+                showToast('info',`Email ${email} sudah ada. Memulihkan data Firestore...`);
+              } catch { showToast('error','Email sudah digunakan dengan password berbeda.'); await signOut2(auth2); return; }
+            } else throw createErr;
+          }
+          await signOut2(auth2);
+          const userRef=doc(db,'users',uid), userSnap=await getDoc(userRef);
+          const newUserData={nama, email, role, id_karyawan:idKaryawan, jabatan, created_at:serverTimestamp()};
+          if (userSnap.exists()) { await updateDoc(userRef, newUserData); showToast('success',`✅ Akun ${nama} diperbarui.`); }
+          else { await setDoc(userRef, newUserData); showToast('success',`✅ Akun ${nama} berhasil ${isRecovered?'dipulihkan':'dibuat'}. Pass: absen123`); }
+          if (Cache.akunList) {
+            const idx=Cache.akunList.findIndex(u=>u.uid===uid);
+            if (idx>=0) Cache.akunList[idx]={uid,...newUserData}; else Cache.akunList.push({uid,...newUserData});
+            renderAkunTable(Cache.akunList);
+          } else Cache.akunList=null;
+          if (idKaryawan&&jabatan) {
+            const exists=Cache.karyawan?.some(k=>k.id_karyawan===idKaryawan);
+            if (!exists) {
+              const q=query(collection(db,'karyawan'), where('id_karyawan','==',idKaryawan), limit(1));
+              const snap2=await getDocs(q);
+              if (snap2.empty) {
+                const nk={id_karyawan:idKaryawan, nama, jabatan, departemen:'-', status:'Aktif'};
+                const ref=await addDoc(collection(db,'karyawan'), nk);
+                if (Cache.karyawan) { Cache.karyawan.push({id:ref.id,...nk}); karyawanList=Cache.karyawan; populateDropdowns(); }
+                else await loadKaryawan();
+              }
+            }
+          }
+          ['akun-nama','akun-username','akun-id-karyawan','akun-jabatan'].forEach(id=>document.getElementById(id).value='');
+          document.getElementById('akun-role').selectedIndex=0;
+          document.getElementById('akun-email-preview').textContent='';
+        } catch(e) { showToast('error','Gagal: '+(friendlyAuthError(e.code)||e.message)); }
+      }, '<i class="fas fa-plus"></i> Buat Akun');
+    };
+
+    window.onNamaInput = function() {
+      const nama=document.getElementById('akun-nama').value.trim();
+      document.getElementById('akun-username').value=nama.toLowerCase().replace(/\s+/g,'').replace(/[^a-z0-9]/g,'');
+      updateEmailPreview();
+    };
+    window.updateEmailPreview = function() {
+      const val=document.getElementById('akun-username').value.trim();
+      const email=val?(val.includes('@')?val:val+'@mangkuresto.id'):'';
+      document.getElementById('akun-email-preview').textContent=email?'→ '+email:'';
+    };
+
+    // ── GANTI PASSWORD ────────────────────────────────────────────
+    window.gantiPassword = async function() {
+      const btn=document.getElementById('btn-ganti-pass');
+      runAction(btn, async () => {
+        const passLama=document.getElementById('pass-lama').value;
+        const passBaru=document.getElementById('pass-baru').value;
+        const passUlang=document.getElementById('pass-ulang').value;
+        if (!passLama||!passBaru||!passUlang) { showToast('warning','Semua field wajib diisi.'); return; }
+        if (passBaru!==passUlang)  { showToast('error','Password baru dan ulangi tidak sama.'); return; }
+        if (passBaru.length<6)     { showToast('error','Password minimal 6 karakter.'); return; }
+        try {
+          const cred=EmailAuthProvider.credential(currentUser.email, passLama);
+          await reauthenticateWithCredential(currentUser, cred);
+          await updatePassword(currentUser, passBaru);
+          showToast('success','✅ Password berhasil diganti!');
+          ['pass-lama','pass-baru','pass-ulang'].forEach(id=>document.getElementById(id).value='');
+          document.getElementById('pass-match-hint').textContent='';
+        } catch(e) {
+          let msg=friendlyAuthError(e.code);
+          if (e.code==='auth/wrong-password'||e.code==='auth/invalid-credential') msg='Password lama yang anda masukan salah';
+          showToast('error', msg);
+        }
+      }, '<i class="fas fa-key"></i> Ganti Password');
+    };
+
+    window.checkPassMatch = function() {
+      const baru=document.getElementById('pass-baru').value;
+      const ulang=document.getElementById('pass-ulang').value;
+      const hint=document.getElementById('pass-match-hint');
+      if (!ulang) { hint.textContent=''; return; }
+      if (baru===ulang) { hint.textContent='✓ Password cocok'; hint.className='text-xs mt-1 text-emerald-600 font-semibold'; }
+      else              { hint.textContent='✗ Password tidak cocok'; hint.className='text-xs mt-1 text-rose-600 font-semibold'; }
+    };
+
+    // ── RESET & DELETE UTILS ──────────────────────────────────────
+    async function deleteDocsByQuery(q) {
+      const snap=await getDocs(q);
+      await Promise.all(snap.docs.map(d=>deleteDoc(d.ref)));
+      return snap.size;
+    }
+
+    let pendingActionConfirm=null;
+    window.openActionConfirm = function({title, message, confirmText='Ya, Lanjut', variant='danger', onConfirm}) {
+      pendingActionConfirm=onConfirm;
+      document.getElementById('action-confirm-title').textContent   = title;
+      document.getElementById('action-confirm-message').textContent = message;
+      const btn=document.getElementById('btn-action-confirm');
+      btn.innerHTML=`<i class="fas ${variant==='danger'?'fa-trash-alt':'fa-check'}"></i> ${confirmText}`;
+      btn.className=`${variant==='danger'?'btn-danger':'btn-primary'} flex-1 flex items-center justify-center gap-2`;
+      showEl('action-confirm-modal');
+    };
+    window.closeActionConfirm = function() { pendingActionConfirm=null; hideEl('action-confirm-modal'); };
+    window.submitActionConfirm = async function() {
+      const btn=document.getElementById('btn-action-confirm');
+      btn.disabled=true; const orig=btn.innerHTML; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Memproses...';
+      try { if(pendingActionConfirm) await pendingActionConfirm(); window.closeActionConfirm(); }
+      catch(e) { showToast('error',e.message||'Aksi gagal.'); }
+      finally { btn.disabled=false; btn.innerHTML=orig; }
+    };
+
+    window.doHapusUser = async function() {
+      const uid=document.getElementById('confirm-hapus-uid').value;
+      const btn=document.getElementById('btn-confirm-hapus');
+      btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Menghapus...';
+      try {
+        const userRef=doc(db,'users',uid), userSnap=await getDoc(userRef);
+        if (!userSnap.exists()) throw new Error('Data pengguna tidak ditemukan.');
+        const userData=userSnap.data();
+        let deletedA=0, deletedK=0;
+        if (userData.id_karyawan) {
+          deletedA=await deleteDocsByQuery(query(collection(db,'absensi'),  where('id_karyawan','==',userData.id_karyawan)));
+          deletedK=await deleteDocsByQuery(query(collection(db,'karyawan'), where('id_karyawan','==',userData.id_karyawan)));
+        }
+        await deleteDoc(userRef);
+        if (Cache.akunList)   Cache.akunList=Cache.akunList.filter(u=>u.uid!==uid);
+        if (Cache.karyawan)   Cache.karyawan=Cache.karyawan.filter(k=>k.id_karyawan!==userData.id_karyawan);
+        karyawanList=Cache.karyawan||[]; populateDropdowns();
+        Cache.invalidateRekap(); Cache._gaji={};
+        renderAkunTable(Cache.akunList||[]);
+        const extra=[]; if(deletedA) extra.push(`${deletedA} absensi`); if(deletedK) extra.push(`${deletedK} data karyawan`);
+        showToast('success',`Pengguna dihapus dari Firestore.${extra.length?' Juga: '+extra.join(' dan '):''} Auth tetap di Firebase Console.`);
+        hideEl('confirm-hapus-modal');
+      } catch(e) { showToast('error','Gagal: '+e.message); }
+      finally { btn.disabled=false; btn.innerHTML='<i class="fas fa-trash-alt"></i> Ya, Hapus'; }
+    };
+
+    window.submitResetAbsensi = async function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya Admin.'); return; }
+      const dari=document.getElementById('reset-absensi-dari').value;
+      const sampai=document.getElementById('reset-absensi-sampai').value;
+      if (!dari||!sampai) { showToast('warning','Tanggal Awal Dan Akhir Wajib Diisi.'); return; }
+      if (sampai<dari)    { showToast('error','Sampai Tidak Boleh Sebelum Dari.'); return; }
+      const btn=document.getElementById('btn-reset-absensi');
+      await runAction(btn, async () => {
+        await new Promise((resolve, reject) => {
+          window.openActionConfirm({
+            title:'Reset Absensi?', message:`Data absensi ${dari} s/d ${sampai} akan dihapus permanen.`,
+            confirmText:'Ya, Reset', variant:'danger',
+            onConfirm: async () => {
+              const q=query(collection(db,'absensi'), where('tanggal','>=',dari), where('tanggal','<=',sampai));
+              const snap=await getDocs(q);
+              if (snap.empty) { reject(new Error('Tidak Ada Data Pada Rentang Tersebut.')); return; }
+              await Promise.all(snap.docs.map(d=>deleteDoc(d.ref)));
+              Cache.invalidateRekap(); Cache._gaji={};
+              showToast('success',`${snap.size} Data Absensi Dihapus.`);
+              document.getElementById('reset-absensi-dari').value=''; document.getElementById('reset-absensi-sampai').value='';
+              resolve();
+            }
+          });
+          const origClose=window._closeActionConfirmOrig||window.closeActionConfirm;
+          window._closeActionConfirmOrig=origClose;
+          window.closeActionConfirm=function() { window.closeActionConfirm=origClose; window._closeActionConfirmOrig=null; origClose(); resolve(); };
+        });
+      }, '<i class="fas fa-trash-alt"></i> Submit');
+    };
+
+    // ══════════════════════════════════════════════════════════════
+    // INVENTARIS
+    // ══════════════════════════════════════════════════════════════
+
+    document.getElementById('inv-lokasi')?.addEventListener('change', function() { updateInvItemRows(this.value); });
+
+    function updateInvItemRows(lokasi) {
+      const items = INV_ITEMS[lokasi] || [];
+      const container = document.getElementById('inv-items-container');
+      if (!container) return;
+      container.querySelectorAll('.inv-item-row').forEach(row => {
+        const sel = row.querySelector('.inv-item-select'); if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = '<option value="" disabled selected>-- Pilih Barang --</option>';
+        items.forEach(item => {
+          const o = document.createElement('option');
+          o.value = item; o.textContent = item;
+          if (item === cur) o.selected = true;
+          sel.appendChild(o);
+        });
+      });
+      if (container.querySelectorAll('.inv-item-row').length === 0) addInvItemRow();
+    }
+
+    window.addInvItemRow = function() {
+      const btn = document.getElementById('btn-add-item');
+      runAction(btn, async () => {
+        const lokasi = document.getElementById('inv-lokasi').value;
+        if (!lokasi) { showToast('warning','Pilih lokasi gudang terlebih dahulu.'); return; }
+        const items = INV_ITEMS[lokasi] || [];
+        const container = document.getElementById('inv-items-container');
+        const rowCount = container.querySelectorAll('.inv-item-row').length;
+        if (rowCount >= items.length) { showToast('warning',`Semua ${items.length} barang sudah ditambahkan.`); return; }
+        const row = document.createElement('div');
+        row.className = 'inv-item-row flex items-center gap-3'; row.dataset.index = rowCount;
+        row.innerHTML = `<div class="flex-1"><select class="inv-item-select input-field pr-10"><option value="" disabled selected>-- Pilih Barang --</option>${items.map(i=>`<option value="${i}">${i}</option>`).join('')}</select></div><div class="w-28"><input type="number" min="1" class="inv-item-qty input-field text-center" placeholder="Jml"></div>${rowCount>0?`<button type="button" onclick="removeInvItemRow(this)" class="h-10 w-10 flex-shrink-0 flex items-center justify-center rounded-xl bg-rose-50 text-rose-500 hover:bg-rose-100 transition"><i class="fas fa-minus text-xs"></i></button>`:'<div class="w-10 flex-shrink-0"></div>'}`;
+        container.appendChild(row);
+      }, `<i class="fas fa-plus text-[10px]"></i> Tambah Item`);
+    };
+
+    window.removeInvItemRow = function(btn) { btn.closest('.inv-item-row').remove(); };
+
+    window.resetInventarisForm = function() {
+      document.getElementById('inv-lokasi').value='';
+      document.getElementById('inv-items-container').innerHTML='';
+      document.querySelectorAll('input[name="inv-tipe"]').forEach(r=>r.checked=false);
+      showToast('info','Form WD & Deposit dikosongkan.');
+    };
+
+    window.submitInventaris = async function() {
+      const btn = document.getElementById('btn-inv-submit');
+      runAction(btn, async () => {
+        const lokasi = document.getElementById('inv-lokasi').value;
+        const tipe = document.querySelector('input[name="inv-tipe"]:checked')?.value;
+        if (!lokasi||!tipe) { showToast('warning','Pilih lokasi dan tipe transaksi.'); return; }
+        const rows = document.querySelectorAll('.inv-item-row');
+        const items = []; let hasError = false;
+        rows.forEach(row => {
+          const barang = row.querySelector('.inv-item-select').value;
+          const jumlah = parseInt(row.querySelector('.inv-item-qty').value);
+          if (!barang||!jumlah||jumlah<1) { hasError=true; return; }
+          items.push({barang, jumlah});
+        });
+        if (hasError||items.length===0) { showToast('warning','Lengkapi semua item.'); return; }
+
+        try {
+          const now = new Date();
+          const result=await apiRequest('/api/inventory/transaction',{method:'POST',body:JSON.stringify({lokasi,tipe,items})});
+          if(!Cache.stok)Cache.stok=[];
+          for(const stock of result.stocks){
+            const cachedEntry=Cache.stok.find(s=>s.lokasi===lokasi&&s.nama_barang===stock.barang);
+            if(cachedEntry)cachedEntry.jumlah=stock.jumlah;
+            else Cache.stok.push({lokasi,nama_barang:stock.barang,jumlah:stock.jumlah});
+          }
+          Cache.stokTs=Date.now();
+          Cache.invalidateLog();
+          if (document.getElementById('page-inv-stok').classList.contains('active')&&Cache.stok) renderStokGrid(Cache.stok);
+          showToast('success',`${tipe} ${items.length} item berhasil dicatat.`);
+          const namaUser = currentProfile.nama || currentUser.email;
+          discordInventaris(tipe, items, lokasi, namaUser, now);
+          document.getElementById('inv-lokasi').value='';
+          document.getElementById('inv-items-container').innerHTML='';
+          document.querySelectorAll('input[name="inv-tipe"]').forEach(r=>r.checked=false);
+        } catch(e) { showToast('error','Gagal: '+e.message); }
+      }, '<i class="fas fa-save"></i> Simpan Transaksi');
+    };
+
+    // ── STOK PAGE ─────────────────────────────────────────────────
+    window.loadStokPage = async function(forceRefresh=false) {
+      if (_loadingStok) return;
+      const grid=document.getElementById('stok-grid'), btn=document.getElementById('btn-stok-refresh');
+      if (!grid) return;
+      if (Cache.stok&&!Cache.isStokStale()&&!forceRefresh) { renderStokGrid(Cache.stok); _updateStokRefreshBtn(btn,false); return; }
+      _loadingStok=true; _updateStokRefreshBtn(btn,true);
+      grid.innerHTML='<div class="col-span-3 text-center py-12 text-slate-400"><i class="fas fa-spinner fa-spin text-2xl"></i></div>';
+      try {
+        const snap=await getDocs(collection(db,'inventaris_stok'));
+        Cache.stok=snap.docs.map(d=>d.data()); Cache.stokTs=Date.now();
+        renderStokGrid(Cache.stok); _updateStokRefreshBtn(btn,false);
+      } catch(e) { grid.innerHTML=`<div class="col-span-3 text-center py-8 text-rose-500">Gagal: ${e.message}</div>`; _updateStokRefreshBtn(btn,false); }
+      finally { _loadingStok=false; }
+    };
+
+    function _updateStokRefreshBtn(btn, isLoading) {
+      if (!btn) return;
+      if (isLoading) { btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin text-xs"></i> Memuat...'; return; }
+      btn.disabled=false;btn.title='';btn.innerHTML='<i class="fas fa-rotate-right text-xs"></i> Refresh';
+    }
+
+    // renderStokGrid — now uses dynamic INV_ITEMS
+    function renderStokGrid(stokData) {
+      const grid = document.getElementById('stok-grid'); if (!grid) return;
+      const stokMap = {};
+      stokData.forEach(({lokasi,nama_barang,jumlah})=>{ if(!stokMap[lokasi]) stokMap[lokasi]={}; stokMap[lokasi][nama_barang]=jumlah||0; });
+
+      // Build lokasi list from INV_ITEMS keys
+      const lokasiMeta = [
+        {key:'Kulkas', icon:'fa-snowflake', color:'sky'},
+        {key:'Brangkas', icon:'fa-vault', color:'indigo'}
+      ];
+
+      grid.innerHTML = lokasiMeta.map(({key,icon,color}) => {
+        const items = INV_ITEMS[key] || [];
+        const stocks = stokMap[key] || {};
+        const rows = items.map(item => {
+          const qty = stocks[item] ?? 0;
+          const badge = qty===0
+            ? '<span class="text-xs font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full">Habis</span>'
+            : qty<=5
+              ? `<span class="text-sm font-black text-amber-600">${qty}</span>`
+              : `<span class="text-sm font-black text-emerald-700">${qty}</span>`;
+          return `<div class="flex items-center justify-between py-2 border-b border-slate-100 last:border-0"><span class="text-sm text-slate-700 font-medium">${item}</span>${badge}</div>`;
+        }).join('');
+        const itemCount = items.length;
+        return `<div class="glass rounded-[24px] border border-white/70 p-7 shadow-lg shadow-slate-200/40 text-center min-h-[260px]">
+          <div class="flex items-center justify-center gap-3 mb-5">
+            <div class="h-10 w-10 rounded-xl bg-${color}-100 flex items-center justify-center text-${color}-700 flex-shrink-0"><i class="fas ${icon}"></i></div>
+            <div>
+              <p class="text-xs font-bold uppercase tracking-widest text-${color}-700">Gudang</p>
+              <h3 class="text-base font-extrabold text-slate-900">${key}</h3>
+            </div>
+            <span class="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded-lg">${itemCount} item</span>
+          </div>
+          <div class="max-w-xl mx-auto">${rows||'<p class="text-sm text-slate-400 text-center py-4">Belum ada item terdaftar</p>'}</div>
+        </div>`;
+      }).join('');
+    }
+
+    // ── LOG BARANG ────────────────────────────────────────────────
+    window.loadLogBarang = async function() {
+      if (_loadingLog) return;
+      const tbody=document.getElementById('log-tbody'); if(!tbody) return;
+      const cacheKey='log|all', cached=Cache.getLog(cacheKey);
+      if (cached) { renderLogTable(cached); _updateLogRefreshBtn(document.getElementById('btn-log-refresh'),false); return; }
+      _loadingLog=true; _updateLogRefreshBtn(document.getElementById('btn-log-refresh'),true);
+      tbody.innerHTML='<tr><td colspan="7" class="text-center py-8 text-slate-400"><i class="fas fa-spinner fa-spin"></i> Memuat...</td></tr>';
+      try {
+        const q=query(collection(db,'inventaris_logs'), orderBy('waktu','desc'), limit(100));
+        const snap=await getDocs(q);
+        const rows=snap.docs.map(d=>({id:d.id,...d.data()}));
+        Cache.setLog(cacheKey, rows); renderLogTable(rows); _updateLogRefreshBtn(document.getElementById('btn-log-refresh'),false);
+      } catch(e) { tbody.innerHTML=`<tr><td colspan="7" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`; _updateLogRefreshBtn(document.getElementById('btn-log-refresh'),false); }
+      finally { _loadingLog=false; }
+    };
+
+    window.refreshLogBarang = function() { Cache.invalidateLog(); loadLogBarang(); };
+
+    function _updateLogRefreshBtn(btn, isLoading) {
+      if (!btn) return;
+      if (isLoading) { btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin text-xs"></i> Memuat...'; return; }
+      const cacheKey='log|all', cached=Cache.getLog(cacheKey);
+      if (cached) {
+        const entry=Cache._log[cacheKey], sisaMs=Cache.TTL-(Date.now()-entry.ts), sisaMnt=Math.max(1,Math.ceil(sisaMs/60000));
+        btn.disabled=true; btn.title=`Cache aktif. Refresh dalam ±${sisaMnt} menit.`;
+        btn.innerHTML=`<i class="fas fa-clock text-xs"></i> Cache (~${sisaMnt}m)`;
+        setTimeout(()=>{ if(btn){btn.disabled=false;btn.title='';btn.innerHTML='<i class="fas fa-rotate-right text-xs"></i> Refresh';} }, sisaMs);
+      } else { btn.disabled=false; btn.title=''; btn.innerHTML='<i class="fas fa-rotate-right text-xs"></i> Refresh'; }
+    }
+
+    function renderLogTable(rows) {
+      const tbody=document.getElementById('log-tbody'); if(!tbody) return;
+      if (!rows.length) { tbody.innerHTML='<tr><td colspan="7" class="text-center py-8 text-slate-400">Belum ada log.</td></tr>'; return; }
+      tbody.innerHTML=rows.map(r=>{
+        const waktu=r.waktu?.toDate?r.waktu.toDate().toLocaleString('id-ID'):(r.waktu?new Date(r.waktu).toLocaleString('id-ID'):'-');
+        const tipeBadge=r.tipe==='Deposit'?'<span class="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">Deposit</span>':r.tipe==='Laporan Masak'?'<span class="px-2.5 py-1 rounded-lg text-xs font-bold bg-blue-100 text-blue-700">Laporan Masak</span>':'<span class="px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-100 text-rose-700">WD</span>';
+        return `<tr><td class="text-xs text-slate-500 font-medium">${waktu}</td><td class="font-semibold text-slate-900">${r.nama_user||'-'}</td><td>${tipeBadge}</td><td class="font-medium text-slate-700">${r.nama_barang||'-'}</td><td class="font-bold text-center text-slate-900">${r.jumlah||0}</td><td class="text-xs text-slate-500">${r.lokasi||'-'}</td><td><button onclick="hapusLogBarang('${r.id}')" class="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-100"><i class="fas fa-trash-alt"></i> Hapus</button></td></tr>`;
+      }).join('');
+    }
+
+    window.hapusLogBarang = function(id) {
+      openActionConfirm({title:'Hapus Log Barang?',message:'Log akan dihapus dan dampaknya pada stok Hasil Akhir akan dibalik.',confirmText:'Ya, Hapus',variant:'danger',onConfirm:async()=>{
+        const result=await apiRequest('/api/inventory/log/'+encodeURIComponent(id),{method:'DELETE'});
+        if(Cache.stok){const row=Cache.stok.find(s=>s.lokasi===result.lokasi&&s.nama_barang===result.nama_barang);if(row)row.jumlah=result.jumlah;Cache.stokTs=Date.now();}
+        Cache.invalidateLog();await loadLogBarang();
+        if(document.getElementById('page-inv-stok').classList.contains('active')&&Cache.stok)renderStokGrid(Cache.stok);
+        showToast('success','Log dihapus dan stok Hasil Akhir diperbarui.');
+      }});
+    };
+
+    // ── RESET INVENTARIS ──────────────────────────────────────────
+    window.submitResetInventaris = function() {
+      if (currentProfile?.role!=='admin') { showToast('error','Hanya admin.'); return; }
+      window.openActionConfirm({
+        title:'Reset Data Inventaris?', message:'Semua log transaksi akan dihapus. Stok akhir dipertahankan.',
+        confirmText:'Ya, Reset', variant:'danger',
+        onConfirm: async () => {
+          const stokSnap=await getDocs(collection(db,'inventaris_stok'));
+          const stokSnapshot=stokSnap.docs.map(d=>({id:d.id,...d.data()}));
+          const logsSnap=await getDocs(collection(db,'inventaris_logs'));
+          const makeBatch=(docs)=>{ const batches=[]; let b=writeBatch(db),c=0; docs.forEach(d=>{ b.delete(d.ref); c++; if(c===500){batches.push(b);b=writeBatch(db);c=0;} }); if(c>0) batches.push(b); return batches; };
+          await Promise.all(makeBatch(logsSnap.docs).map(b=>b.commit()));
+          await Promise.all(makeBatch(stokSnap.docs).map(b=>b.commit()));
+          const rwBatches=[]; let rwB=writeBatch(db),rwC=0;
+          stokSnapshot.forEach(item=>{ rwB.set(doc(db,'inventaris_stok',item.id),{lokasi:item.lokasi,nama_barang:item.nama_barang,jumlah:item.jumlah}); rwC++; if(rwC===500){rwBatches.push(rwB);rwB=writeBatch(db);rwC=0;} });
+          if(rwC>0) rwBatches.push(rwB);
+          await Promise.all(rwBatches.map(b=>b.commit()));
+          Cache.stok=stokSnapshot.map(({lokasi,nama_barang,jumlah})=>({lokasi,nama_barang,jumlah})); Cache.stokTs=Date.now(); Cache.invalidateLog();
+          showToast('success',`✅ Reset selesai. ${logsSnap.size} log dihapus.`);
+        }
+      });
+    };
+
+    // ── KALKULATOR CRAFTING ───────────────────────────────────────
+    const RESEP = {
+      biasa: { label:'Paket Biasa', qtyPerPaket:1, satuan:'Paket', bahan:{'Mayonnaise':1,'Ikan Salmon':15,'Kentang':10,'Jeruk':15,'Gula':15,'Es Batu':15} },
+      kenyang:{ label:'Paket Kenyang',qtyPerPaket:1,satuan:'Paket', bahan:{'Beras':10,'Ayam Paket':15,'Telor Ayam':5,'Cabe':5,'Gula':10,'Es Batu':15,'Teh':15,'Air Mineral':10} }
+    };
+
+    window.hitungKalkulator = function() {
+      const menuKey=document.getElementById('kalk-menu').value, paket=parseInt(document.getElementById('kalk-paket').value);
+      const panel=document.getElementById('kalk-result');
+      if (!menuKey||!paket||paket<1) { panel.style.display='none'; return; }
+      const data=RESEP[menuKey], total=data.qtyPerPaket*paket;
+      document.getElementById('kalk-summary').textContent=`Total: ${total} ${data.satuan}`;
+      document.getElementById('kalk-items').innerHTML=Object.entries(data.bahan).map(([item,qty])=>`<div class="flex items-center justify-between py-2 border-b border-emerald-100 last:border-0"><span class="text-sm text-slate-700 font-medium capitalize">${item}</span><span class="text-sm font-black text-emerald-800 bg-white px-3 py-1 rounded-xl border border-emerald-200">${qty*paket}x</span></div>`).join('');
+      panel.style.display='block';
+    };
+
+    window.resetKalkulator = function() {
+      document.getElementById('kalk-menu').selectedIndex=0; document.getElementById('kalk-paket').value='';
+      document.getElementById('kalk-result').style.display='none';
+      document.getElementById('kalk-items').innerHTML=''; document.getElementById('kalk-summary').textContent='';
+    };
+
+    // ══════════════════════════════════════════════════════════════
+    // KELOLA ITEM INVENTARIS (ADMIN ONLY) — NEW FEATURE
+    // CRUD untuk collection `inv_items` di Firestore
+    // Dokumen format: { nama_barang: string, lokasi: string[] }
+    // ══════════════════════════════════════════════════════════════
+
+    // State untuk halaman kelola item
+    let invItemsList = []; // [{id, nama_barang, lokasi:[...]}]
+    let _loadingInvItemsPage = false;
+
+    const ALL_LOKASI = ['Kulkas', 'Brangkas'];
+
+    // Load dan render tabel item
+    async function loadInvItemsPage() {
+      if (_loadingInvItemsPage) return;
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      _loadingInvItemsPage = true;
+      const tbody = document.getElementById('inv-items-tbody');
+      tbody.innerHTML = '<tr><td colspan="4" class="text-center py-8 text-slate-400"><i class="fas fa-spinner fa-spin"></i> Memuat...</td></tr>';
+      try {
+        const snap = await getDocs(collection(db, 'inv_items'));
+        invItemsList = snap.docs.map(d => ({id: d.id, ...d.data()}));
+        invItemsList.sort((a,b) => (a.nama_barang||'').localeCompare(b.nama_barang||''));
+        renderInvItemsTable(invItemsList);
+        document.getElementById('inv-items-count-label').textContent = invItemsList.length + ' item terdaftar';
+      } catch(e) {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center py-8 text-rose-500">Gagal: ${e.message}</td></tr>`;
+      } finally { _loadingInvItemsPage = false; }
+    }
+    window.loadInvItemsPage = loadInvItemsPage;
+
+    function renderInvItemsTable(items) {
+      const tbody = document.getElementById('inv-items-tbody');
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center py-12 text-slate-400"><i class="fas fa-box-open text-3xl text-slate-200 block mb-2"></i>Belum ada item. Tambah item di atas.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map((item, i) => {
+        const lokasiTags = (item.lokasi || []).map(l => {
+          const color = l==='Kulkas'?'sky':'indigo';
+          return `<span class="inline-flex items-center rounded-lg bg-${color}-50 px-2 py-0.5 text-xs font-bold text-${color}-700 border border-${color}-100">${l}</span>`;
+        }).join(' ');
+        return `<tr>
+          <td class="text-slate-400 font-semibold">${i+1}</td>
+          <td class="font-semibold text-slate-900">${item.nama_barang||'-'}</td>
+          <td><div class="flex flex-wrap gap-1">${lokasiTags||'<span class="text-slate-400 text-xs italic">Tidak ada lokasi</span>'}</div></td>
+          <td>
+            <div class="flex gap-2">
+              <button onclick="openEditInvItem('${item.id}')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition">
+                <i class="fas fa-pencil text-[10px]"></i> Edit
+              </button>
+              <button onclick="confirmHapusInvItem('${item.id}','${(item.nama_barang||'').replace(/'/g,"\\'")}')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 transition">
+                <i class="fas fa-trash-alt text-[10px]"></i> Hapus
+              </button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Tambah item baru
+    window.submitTambahInvItem = async function() {
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      const btn = document.getElementById('btn-tambah-inv-item');
+      await runAction(btn, async () => {
+        const nama = document.getElementById('new-inv-item-nama').value.trim();
+        if (!nama) { showToast('warning','Nama barang wajib diisi.'); return; }
+
+        const selectedLokasi = ALL_LOKASI.filter(l => {
+          const cb = document.getElementById(`new-inv-lokasi-${l.replace(/\s+/g,'-').toLowerCase()}`);
+          return cb && cb.checked;
+        });
+        if (selectedLokasi.length === 0) { showToast('warning','Pilih minimal 1 lokasi.'); return; }
+
+        // Cek duplikat nama (case-insensitive)
+        const isDup = invItemsList.some(x => (x.nama_barang||'').toLowerCase() === nama.toLowerCase());
+        if (isDup) { showToast('error',`Item "${nama}" sudah terdaftar.`); return; }
+
+        try {
+          const ref = await addDoc(collection(db, 'inv_items'), {
+            nama_barang: nama,
+            lokasi: selectedLokasi,
+            created_at: serverTimestamp()
+          });
+          showToast('success', `✅ Item "${nama}" berhasil ditambahkan.`);
+          // Reset form
+          document.getElementById('new-inv-item-nama').value = '';
+          ALL_LOKASI.forEach(l => {
+            const cb = document.getElementById(`new-inv-lokasi-${l.replace(/\s+/g,'-').toLowerCase()}`);
+            if (cb) cb.checked = false;
+          });
+          // Reload INV_ITEMS dan tabel
+          invItemsLoaded = false;
+          await loadInvItems();
+          await loadInvItemsPage();
+        } catch(e) { showToast('error', 'Gagal: ' + e.message); }
+      }, '<i class="fas fa-plus"></i> Tambah Item');
+    };
+
+    // Edit item
+    window.openEditInvItem = function(itemId) {
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      const item = invItemsList.find(x => x.id === itemId);
+      if (!item) { showToast('error','Item tidak ditemukan.'); return; }
+      document.getElementById('edit-inv-item-id').value   = itemId;
+      document.getElementById('edit-inv-item-nama').value = item.nama_barang || '';
+      ALL_LOKASI.forEach(l => {
+        const cb = document.getElementById(`edit-inv-lokasi-${l.replace(/\s+/g,'-').toLowerCase()}`);
+        if (cb) cb.checked = (item.lokasi || []).includes(l);
+      });
+      showEl('edit-inv-item-modal');
+    };
+    window.closeEditInvItemModal = function() { hideEl('edit-inv-item-modal'); };
+
+    window.saveEditInvItem = async function() {
+      if (currentProfile?.role !== 'admin') { showToast('error','Hanya admin.'); return; }
+      const itemId = document.getElementById('edit-inv-item-id').value;
+      const nama   = document.getElementById('edit-inv-item-nama').value.trim();
+      if (!nama) { showToast('warning','Nama barang wajib diisi.'); return; }
+
+      const selectedLokasi = ALL_LOKASI.filter(l => {
+        const cb = document.getElementById(`edit-inv-lokasi-${l.replace(/\s+/g,'-').toLowerCase()}`);
+        return cb && cb.checked;
+      });
+      if (selectedLokasi.length === 0) { showToast('warning','Pilih minimal 1 lokasi.'); return; }
+
+      // Cek duplikat (exclude diri sendiri)
+      const isDup = invItemsList.some(x => x.id !== itemId && (x.nama_barang||'').toLowerCase() === nama.toLowerCase());
+      if (isDup) { showToast('error',`Item "${nama}" sudah terdaftar.`); return; }
+
+      const btn = document.getElementById('btn-save-edit-inv-item');
+      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+      try {
+        await updateDoc(doc(db, 'inv_items', itemId), { nama_barang: nama, lokasi: selectedLokasi });
+        showToast('success', `✅ Item berhasil diperbarui.`);
+        hideEl('edit-inv-item-modal');
+        invItemsLoaded = false;
+        await loadInvItems();
+        await loadInvItemsPage();
+      } catch(e) { showToast('error', 'Gagal: ' + e.message); }
+      finally { btn.disabled=false; btn.innerHTML='<i class="fas fa-save"></i> Simpan'; }
+    };
+
+    // Hapus item
+    window.confirmHapusInvItem = function(itemId, nama) {
+      window.openActionConfirm({
+        title: `Hapus Item "${nama}"?`,
+        message: `Item ini akan dihapus dari daftar inventaris. Stok yang sudah tercatat tidak akan terhapus.`,
+        confirmText: 'Ya, Hapus',
+        variant: 'danger',
+        onConfirm: async () => {
+          await deleteDoc(doc(db, 'inv_items', itemId));
+          showToast('success', `Item "${nama}" berhasil dihapus.`);
+          invItemsLoaded = false;
+          await loadInvItems();
+          await loadInvItemsPage();
+        }
+      });
+    };
+
+    // Filter tabel item
+    window.filterInvItemsTable = function() {
+      const q = document.getElementById('inv-items-search').value.trim().toLowerCase();
+      const filtered = q ? invItemsList.filter(x => (x.nama_barang||'').toLowerCase().includes(q)) : invItemsList;
+      renderInvItemsTable(filtered);
+    };
+
+    // ── UTILS ─────────────────────────────────────────────────────
+    function getLocalDateStr() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+    function formatTime(date) { return date.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); }
+    function menit2str(m) { return `${Math.floor(m/60)}j ${m%60}m`; }
+    function formatPeriode(dari, sampai) {
+      if (!dari&&!sampai) return 'SEMUA PERIODE';
+      const fmt=s=>{ const d=new Date(s); const M=['JAN','FEB','MAR','APR','MEI','JUN','JUL','AGU','SEP','OKT','NOV','DES']; return `${d.getDate()} ${M[d.getMonth()]} ${d.getFullYear()}`; };
+      if (dari&&sampai) return `${fmt(dari)} - ${fmt(sampai)}`;
+      return dari?`DARI ${fmt(dari)}`:`S/D ${fmt(sampai)}`;
+    }
+    function friendlyAuthError(code) {
+      const map={'auth/invalid-credential':'Password yang anda masukan salah','auth/user-not-found':'Akun tidak ditemukan.','auth/wrong-password':'Password yang anda masukan salah','auth/email-already-in-use':'Email sudah digunakan.','auth/weak-password':'Password terlalu lemah.','auth/invalid-email':'Format email tidak valid.','auth/missing-email':'Email wajib diisi.','auth/too-many-requests':'Terlalu banyak percobaan.','auth/requires-recent-login':'Login ulang diperlukan.'};
+      return map[code]||code;
+    }
+    function showLoginScreen() { hideEl('app-screen'); showEl('login-screen'); }
+    function showEl(id)  { const el=document.getElementById(id); if(el) el.style.display=''; }
+    function hideEl(id)  { const el=document.getElementById(id); if(el) el.style.display='none'; }
+
+    // ── SHOW PAGE ─────────────────────────────────────────────────
+    const pageLoaded={};
+    window.showPage = function(page) {
+      document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+      const pageEl=document.getElementById('page-'+page); if(pageEl) pageEl.classList.add('active');
+      const navEl=document.getElementById('nav-'+page);   if(navEl)  navEl.classList.add('active');
+      const meta={
+        absensi:'Absensi Harian',rekap:'Rekap Absensi','rekap-gaji':'Rekap Gaji',
+        cuti:'Pengajuan Cuti',statuscuti:'Status Cuti',kelola:'Kelola Akun',
+        'reset-absensi':'Reset Absensi','import-absensi':'Import Absensi',
+        'ganti-password':'Ganti Password','inv-wd':'Wd & Deposit',
+        'inv-stok':'Hasil Akhir','inv-kalkulator':'Kalkulator Crafting',
+        'log-barang':'Log Barang','reset-inventaris':'Reset Inventaris',
+        'rekap-penjualan':'Rekap Penjualan','history-penjualan':'History Rekap Penjualan',
+        'ranking-penjualan':'Ranking Penjualan','laporan-masak':'Laporan Masak',
+        'history-masak':'History Masak',
+        'kelola-item-inv':'Kelola Item Inventaris'  // NEW
+      };
+      document.getElementById('page-title').textContent=meta[page]||'Mangku Resto Dashboard';
+      closeSidebar();
+      if (page==='kelola'&&!pageLoaded.kelola) { pageLoaded.kelola=true; loadAkunList(); }
+      else if(page==='kelola'&&Cache.akunList) renderAkunTable(Cache.akunList);
+      if (page==='inv-stok') { if(!Cache.stok||Cache.isStokStale()) loadStokPage(); else renderStokGrid(Cache.stok); }
+      if (page==='log-barang') { const ck='log|all'; if(Cache.getLog(ck)){renderLogTable(Cache.getLog(ck));_updateLogRefreshBtn(document.getElementById('btn-log-refresh'),false);}else loadLogBarang(); }
+      // NEW: load item inventaris page
+      if (page==='kelola-item-inv') { loadInvItemsPage(); }
+      if (page==='rekap-penjualan'&&window.prepareSalesForm) window.prepareSalesForm();
+      if (page==='rekap'&&window.loadRekap) window.loadRekap();
+      if (page==='statuscuti'&&window.loadStatusCuti) window.loadStatusCuti();
+      if (page==='history-penjualan'&&window.loadSalesHistory) window.loadSalesHistory();
+      if (page==='ranking-penjualan'&&window.loadSalesRanking) window.loadSalesRanking();
+      if (page==='laporan-masak'&&window.prepareCookingForm) window.prepareCookingForm();
+      if (page==='history-masak'&&window.loadCookingHistory) window.loadCookingHistory();
+    };
+
+    window.openSidebar  = function() { document.getElementById('sidebar').classList.add('open');    document.getElementById('sidebar-overlay').classList.add('open');    document.body.style.overflow='hidden'; };
+    window.closeSidebar = function() { document.getElementById('sidebar').classList.remove('open'); document.getElementById('sidebar-overlay').classList.remove('open'); document.body.style.overflow=''; };
+
+    function updateClock() {
+      const el=document.getElementById('live-clock'); if(!el) return;
+      el.textContent=new Date().toLocaleTimeString('id-ID',{timeZone:'Asia/Jakarta',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).replace(/\./g,':');
+    }
+    function updateDate() {
+      const s=new Date().toLocaleDateString('id-ID',{timeZone:'Asia/Jakarta',weekday:'long',year:'numeric',month:'long',day:'numeric'});
+      ['current-date','current-date-clock'].forEach(id=>{ const el=document.getElementById(id); if(el) el.textContent=s; });
+    }
+
+    window.showToast = function(type, message) {
+      const c=document.getElementById('toast-container');
+      const t=document.createElement('div');
+      const icons={success:'fa-circle-check',error:'fa-circle-xmark',warning:'fa-triangle-exclamation',info:'fa-circle-info'};
+      const toastType=['success','error','warning','info'].includes(type)?type:'info';
+      t.className=`toast toast-${toastType} rounded-xl px-4 pt-3 pb-0 text-white overflow-hidden`;
+      t.innerHTML=`<div class="flex items-start gap-3 pb-3"><i class="fas ${icons[type]||icons.info} mt-0.5 flex-shrink-0"></i><span class="text-sm font-semibold leading-5">${message}</span></div><div style="height:3px;border-radius:0 0 16px 16px;background:rgba(255,255,255,0.35);margin:0 -16px;transform-origin:left;animation:toastBarDrain 4.5s linear forwards;"></div>`;
+      c.appendChild(t);
+      playSound(toastType);
+      setTimeout(()=>t.remove(), 4500);
+    };
+
+    function playSound(type) {
+      try {
+        const ctx=new(window.AudioContext||window.webkitAudioContext)();
+        const osc=ctx.createOscillator(), gain=ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination); gain.gain.value=0.08;
+        const frequencies={success:880,error:240,warning:440,info:660};
+        osc.frequency.value=frequencies[type]||660;
+        osc.start(); osc.stop(ctx.currentTime+(type==='success'?0.14:0.25));
+        if (type==='success') {
+          const o2=ctx.createOscillator(), g2=ctx.createGain();
+          o2.connect(g2); g2.connect(ctx.destination); g2.gain.value=0.08;
+          o2.frequency.value=1180; o2.start(ctx.currentTime+0.14); o2.stop(ctx.currentTime+0.28);
+        }
+      } catch(e) {}
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key==='Enter') {
+        const ls=document.getElementById('login-screen');
+        if (ls&&ls.style.display!=='none') window.doLogin();
+      }
+      if (e.key==='Escape') {
+        hideEl('confirm-hapus-modal'); hideEl('action-confirm-modal');
+        hideEl('edit-modal'); hideEl('editcuti-modal');
+        hideEl('edit-inv-item-modal'); hideEl('edit-user-modal');
+        hideEl('edit-sales-modal'); hideEl('edit-cooking-modal');
+      }
+    });
+  </script>
+  <script src="sales-cooking.js?v=20260712-9"></script>
+
+  <style>
+    body{font-family:'Plus Jakarta Sans',sans-serif;background:#fff;}
+    .glass{background:rgba(255,255,255,.88);backdrop-filter:blur(16px);}
+    .toast{animation:slideIn .28s ease-out,fadeOut .28s ease-in 4.22s forwards;}
+    @keyframes toastBarDrain{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+    .pulse-ring{animation:pulse-ring 1.8s cubic-bezier(.215,.61,.355,1) infinite;}
+    .loading-spinner{animation:spin 1s linear infinite;}
+    #sidebar{transform:translateX(-100%);transition:transform .32s cubic-bezier(.4,0,.2,1);}
+    #sidebar.open{transform:translateX(0);}
+    #sidebar-overlay{opacity:0;pointer-events:none;transition:opacity .32s ease;}
+    #sidebar-overlay.open{opacity:1;pointer-events:auto;}
+    .page{display:none;animation:fadeSlideIn .3s ease-out;}
+    .page.active{display:block;}
+    .data-table th{background:#0f766e;color:white;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.06em;padding:12px 16px;white-space:nowrap;}
+    .data-table td{padding:11px 16px;font-size:13px;border-bottom:1px solid #f1f5f9;vertical-align:middle;}
+    .data-table tr:last-child td{border-bottom:none;}
+    .data-table tbody tr:hover{background:#f8fafc;}
+    .gaji-table th{background:#7c3aed;}
+    .badge-pending{background:#fef3c7;color:#92400e;}
+    .badge-approved{background:#d1fae5;color:#065f46;}
+    .badge-rejected{background:#fee2e2;color:#991b1b;}
+    .stat-card{background:white;border-radius:20px;padding:20px 24px;box-shadow:0 4px 24px rgba(0,0,0,.07);border:1px solid rgba(255,255,255,.8);}
+    .gaji-row-done td{opacity:.5;text-decoration:line-through;}
+    #gaji-textbox{font-family:'Courier New',monospace;font-size:13px;line-height:1.6;background:#0f172a;color:#e2e8f0;border:none;border-radius:16px;padding:20px;width:100%;resize:vertical;min-height:220px;outline:none;}
+    #import-absensi-json{font-family:'Courier New',monospace;font-size:12px;line-height:1.6;background:#0f172a;color:#e2e8f0;border:none;border-radius:16px;padding:20px;width:100%;resize:vertical;min-height:280px;outline:none;}
+    @keyframes slideIn{from{transform:translateX(18px);opacity:0}to{transform:translateX(0);opacity:1}}
+    @keyframes fadeOut{to{opacity:0;transform:translateX(18px)}}
+    @keyframes pulse-ring{0%{transform:scale(.85);opacity:.75}100%{transform:scale(1.35);opacity:0}}
+    @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    @keyframes fadeSlideIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}
+    .shake{animation:shake .5s ease-in-out;}
+    select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364758b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='1.8' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 1rem center;background-size:1.1rem;}
+    ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+    .table-wrapper{overflow-x:auto;border-radius:16px;border:1px solid #e2e8f0;}
+    .nav-item{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:14px;font-weight:600;font-size:14px;cursor:pointer;transition:all .18s ease;color:#64748b;}
+    .nav-item:hover{background:#f1f5f9;color:#0f172a;}
+    .nav-item.active{background:linear-gradient(135deg,#0f766e15,#0369a115);color:#0f766e;}
+    .nav-item .nav-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:15px;background:#f8fafc;flex-shrink:0;}
+    .nav-item.active .nav-icon{background:#0f766e;color:white;}
+    .input-field{width:100%;border-radius:14px;border:1.5px solid #e2e8f0;background:#f8fafc;padding:12px 16px;font-size:14px;font-weight:500;color:#1e293b;outline:none;transition:border-color .18s,box-shadow .18s;font-family:'Plus Jakarta Sans',sans-serif;}
+    .input-field:focus{border-color:#0f766e;box-shadow:0 0 0 3px rgba(15,118,110,.12);}
+    .input-field:disabled,.input-field[readonly]{background:#f1f5f9;color:#94a3b8;cursor:not-allowed;}
+    .btn-primary{background:linear-gradient(135deg,#0f766e,#0d9488);color:white;border:none;border-radius:14px;padding:13px 28px;font-weight:700;font-size:14px;cursor:pointer;transition:all .2s ease;box-shadow:0 4px 16px rgba(15,118,110,.25);font-family:'Plus Jakarta Sans',sans-serif;}
+    .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(15,118,110,.35);}
+    .btn-primary:disabled{opacity:.55;cursor:not-allowed;transform:none;}
+    .btn-secondary{background:white;color:#475569;border:1.5px solid #e2e8f0;border-radius:14px;padding:11px 20px;font-weight:600;font-size:13px;cursor:pointer;transition:all .18s ease;font-family:'Plus Jakarta Sans',sans-serif;}
+    .btn-secondary:hover{background:#f8fafc;border-color:#cbd5e1;}
+    .btn-secondary:disabled{opacity:.5;cursor:not-allowed;pointer-events:none;}
+    .btn-purple{background:linear-gradient(135deg,#7c3aed,#8b5cf6);color:white;border:none;border-radius:14px;padding:13px 28px;font-weight:700;font-size:14px;cursor:pointer;transition:all .2s ease;box-shadow:0 4px 16px rgba(124,58,237,.25);font-family:'Plus Jakarta Sans',sans-serif;}
+    .btn-purple:hover{transform:translateY(-1px);}
+    .btn-danger{background:linear-gradient(135deg,#dc2626,#ef4444);color:white;border:none;border-radius:14px;padding:13px 28px;font-weight:700;font-size:14px;cursor:pointer;transition:all .2s ease;box-shadow:0 4px 16px rgba(220,38,38,.25);font-family:'Plus Jakarta Sans',sans-serif;}
+    .btn-danger:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(220,38,38,.35);}
+    .btn-danger:disabled{opacity:.55;cursor:not-allowed;transform:none;}
+    .section-header{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.24em;color:#94a3b8;padding:0 4px;margin-bottom:6px;margin-top:20px;}
+    .section-header:first-child{margin-top:0;}
+    .done-toggle{width:22px;height:22px;border-radius:6px;border:2px solid #e2e8f0;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .18s;flex-shrink:0;background:white;}
+    .done-toggle.checked{background:#0f766e;border-color:#0f766e;color:white;}
+    #login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;}
+    .login-card{background:white;border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,.12);padding:40px;width:100%;max-width:420px;}
+    .modal-backdrop{position:fixed;inset:0;z-index:100;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px;}
+    .modal-card{background:white;border-radius:24px;padding:32px;width:100%;max-width:420px;box-shadow:0 24px 64px rgba(0,0,0,.2);animation:fadeSlideIn .25s ease-out;}
+    .modal-danger-icon{width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,#fee2e2,#fecaca);display:flex;align-items:center;justify-content:center;margin:0 auto 20px;}
+    #toast-container{position:fixed;right:1rem;top:1.25rem;z-index:9999;display:flex;width:min(22rem,calc(100vw - 2rem));flex-direction:column;gap:.65rem;}
+    .toast{border:1px solid rgba(255,255,255,.3);box-shadow:0 16px 38px rgba(15,23,42,.28),0 3px 10px rgba(15,23,42,.18);}
+    .toast-success{background:#15803d}.toast-error{background:#dc2626}.toast-warning{background:#2563eb}.toast-info{background:#1d4ed8}
+    #page-log-barang .data-table td,#page-log-barang .data-table th{padding:12px 16px;}
+    /* Checkbox custom style for lokasi selection */
+    .lokasi-checkbox-label{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:12px;border:1.5px solid #e2e8f0;cursor:pointer;transition:all .18s;font-size:13px;font-weight:600;color:#475569;}
+    .lokasi-checkbox-label:hover{border-color:#0f766e20;background:#f0fdf4;}
+    .lokasi-checkbox-label input[type="checkbox"]{accent-color:#0f766e;width:16px;height:16px;cursor:pointer;flex-shrink:0;}
+    .lokasi-checkbox-label.checked{border-color:#0f766e;background:#f0fdf4;color:#0f766e;}
+    .page .bg-gradient-to-br{background:#2696d1!important;box-shadow:none!important;}
+    .inv-type-option{position:relative;transition:border-color .2s,background-color .2s,box-shadow .2s,transform .2s;}
+    .inv-type-option:has(input:checked){transform:translateY(-1px);}
+    .inv-type-option.deposit-option:has(input:checked){border-color:#38bdf8!important;background:#e0f2fe!important;box-shadow:0 0 0 2px rgba(56,189,248,.15),0 8px 24px rgba(14,165,233,.24)!important;}
+    .inv-type-option.wd-option:has(input:checked){border-color:#fb7185!important;background:#ffe4e6!important;box-shadow:0 0 0 2px rgba(251,113,133,.12),0 8px 24px rgba(244,63,94,.20)!important;}
+    .operation-item-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 42px;gap:10px;align-items:center;}
+    .rank-medal{width:30px;height:30px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;}
+    :root{--line:#dcecf7;--canvas:#f3faff;--brand:#2696d1}body{background:var(--canvas)!important;color:#17202a;font-family:Inter,'Plus Jakarta Sans',sans-serif}.glass,.stat-card{background:#fff;backdrop-filter:none;border-color:var(--line)!important;box-shadow:0 1px 4px rgba(38,150,209,.07)!important}#sidebar{width:236px!important;box-shadow:none!important;border-right:1px solid var(--line)}#sidebar>div:first-child{padding:18px 16px!important}#sidebar nav{padding:12px!important}.section-header{font-size:10px;letter-spacing:.04em;text-transform:none;font-weight:500;color:#86a3b5;margin:18px 8px 6px}.nav-item{gap:10px;padding:8px 10px;border-radius:6px;font-size:12px;font-weight:500;color:#587284}.nav-item .nav-icon{width:22px;height:22px;border-radius:5px;background:transparent;font-size:11px}.nav-item:hover{background:#edf8ff}.nav-item.active{background:#dff3ff;color:#157caf}.nav-item.active .nav-icon{background:transparent;color:var(--brand)}#app-screen>div.min-h-screen{margin-left:236px}#app-screen>div>nav{background:#fff;border-color:var(--line)!important;box-shadow:none!important;padding-top:12px!important;padding-bottom:12px!important}#app-screen main{max-width:1280px!important;padding:24px 28px!important;gap:20px!important}.input-field{border:1px solid #cfe4f1;background:#fff;border-radius:7px;padding:10px 12px;font-size:12px}.input-field:focus{border-color:var(--brand);box-shadow:0 0 0 2px rgba(38,150,209,.12)}.btn-primary,.btn-secondary,.btn-purple,.btn-danger{border-radius:7px;padding:10px 16px;font-size:12px;box-shadow:none!important;transform:none!important}.btn-primary,.btn-purple{background:var(--brand)}.data-table th{background:#eff8fd;color:#65859a;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:0;padding:10px 14px;text-transform:none}.data-table td{font-size:11px;padding:10px 14px;border-color:var(--line)}.table-wrapper{border-radius:8px;border-color:var(--line)}.login-card{border-radius:12px;border:1px solid var(--line);box-shadow:0 12px 35px rgba(38,150,209,.12)}[class*="bg-teal-"],[class*="bg-emerald-"]{background-color:#e4f5ff!important}[class*="text-teal-"],[class*="text-emerald-"]{color:#197fb4!important}[class*="border-teal-"],[class*="border-emerald-"]{border-color:#b9e3f8!important}[class*="from-teal-"],[class*="from-emerald-"]{--tw-gradient-from:#44aee0!important}[class*="to-teal-"],[class*="to-emerald-"]{--tw-gradient-to:#238bc3!important}@media(min-width:768px){#sidebar{transform:none!important}#sidebar-overlay{display:none!important}#sidebar button[onclick="closeSidebar()"]{display:none}#app-screen>div>nav button[onclick="openSidebar()"]{display:none}}@media(max-width:767px){#app-screen>div.min-h-screen{margin-left:0}#sidebar{width:260px!important}#app-screen main{padding:18px 14px!important}}
+    .rounded-none,.table-wrapper,.data-table{border-radius:14px!important;overflow:hidden;}
+    .btn-purple{background:var(--brand)!important;color:#fff!important;}
+    .gaji-table th,#page-kelola .data-table th{background:var(--brand)!important;color:#fff!important;}
+    .text-violet-500,.text-violet-600,.text-violet-700,.text-purple-500,.text-purple-600,.text-purple-700{color:#197fb4!important;}
+    .bg-violet-50,.bg-violet-100,.bg-purple-50,.bg-purple-100{background:#e4f5ff!important;}
+    .border-violet-500,.border-purple-500{border-color:#2696d1!important;}
+    [class*="text-orange-"]{color:#197fb4!important}[class*="bg-orange-"]{background-color:#e4f5ff!important}[class*="border-orange-"]{border-color:#2696d1!important}
+    [class*="from-orange-"]{--tw-gradient-from:#44aee0!important}[class*="to-orange-"]{--tw-gradient-to:#238bc3!important}
+    main .flex.flex-wrap.items-end.gap-3>button{height:39px;min-height:39px;align-self:flex-end;margin-top:0;display:inline-flex;align-items:center;justify-content:center}
+    button{transition:transform .14s ease,filter .14s ease,box-shadow .14s ease,opacity .14s ease}
+    button:active{transform:scale(.96)!important;filter:brightness(.95)}
+    button:disabled{cursor:not-allowed;opacity:.72}
+    #btn-login{box-shadow:0 8px 20px rgba(38,150,209,.22)!important}
+    #btn-login:active{transform:translateY(2px) scale(.98)!important;box-shadow:0 3px 9px rgba(38,150,209,.2)!important}
+    .click-pop{animation:clickPop .22s ease}
+    @keyframes clickPop{0%{transform:translateY(-50%) scale(1)}45%{transform:translateY(-50%) scale(.82)}100%{transform:translateY(-50%) scale(1)}}
+    .border-t-transparent{border-top-color:transparent!important;}
+    #page-inv-stok>.mb-5{justify-content:center;text-align:center;}
+    body{background:#fff!important;}
+  </style>
+  <base target="_blank">
+</head>
+<body class="min-h-screen text-slate-900">
+
+<div id="toast-container"></div>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="text-center mb-8">
+      <img src="5.png" alt="Logo Mangku Resto" class="h-20 w-20 object-contain mx-auto mb-4">
+      <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Mangku Resto Dashboard</h1>
+      <p class="text-sm text-slate-500 mt-1 font-medium">Sistem Dashboard Digital</p>
+    </div>
+    <div class="space-y-4">
+      <div>
+        <label class="mb-1.5 block text-sm font-semibold text-slate-600">Email</label>
+        <div class="relative">
+          <input id="login-email" type="text" class="input-field pr-36" placeholder="ketik nama saja" autocomplete="username" oninput="handleLoginEmailInput()">
+          <span id="login-email-suffix" style="display:none" class="absolute inset-y-0 right-4 items-center text-xs font-bold text-slate-400">@mangkuresto.id</span>
+        </div>
+        <p id="login-email-preview" class="text-xs text-teal-600 font-semibold mt-1.5"></p>
+      </div>
+      <div>
+        <label class="mb-1.5 block text-sm font-semibold text-slate-600">Password</label>
+        <div class="relative">
+          <input id="login-pass" type="password" class="input-field" placeholder="••••••••" autocomplete="current-password">
+          <button type="button" onclick="togglePassVis('login-pass',this)" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><i class="fas fa-eye text-sm"></i></button>
+        </div>
+      </div>
+      <button id="btn-login" onclick="doLogin()" class="btn-primary w-full flex items-center justify-center gap-2 mt-2"><i class="fas fa-sign-in-alt"></i> Masuk</button>
+    </div>
+    <div class="mt-6 p-4 rounded-2xl bg-slate-50 border border-slate-200">
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Info</p>
+      <p class="text-xs text-slate-500 font-medium">Password default akun baru: <code class="bg-slate-200 px-1.5 py-0.5 rounded text-slate-700 font-bold">absen123</code></p>
+      <p class="text-xs text-slate-400 mt-1">Hubungi Admin untuk mendapatkan akun atau reset password.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODALS ══════════════════════════════════════════════════════ -->
+
+<div id="confirm-hapus-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card" style="max-width:400px;">
+    <div class="text-center mb-6"><div class="modal-danger-icon"><i class="fas fa-user-times text-rose-600 text-2xl"></i></div><h3 class="text-xl font-extrabold text-slate-900">Hapus Pengguna?</h3><p class="text-sm text-slate-500 mt-2">Aksi ini tidak dapat dibatalkan.</p></div>
+    <div class="bg-rose-50 border border-rose-100 rounded-2xl p-4 mb-6 text-center"><div class="w-10 h-10 rounded-xl bg-rose-100 flex items-center justify-center mx-auto mb-2"><i class="fas fa-user text-rose-500"></i></div><p id="confirm-hapus-nama" class="font-extrabold text-slate-900 text-base"></p><p id="confirm-hapus-email" class="text-xs text-slate-500 mt-0.5 font-mono"></p></div>
+    <input type="hidden" id="confirm-hapus-uid">
+    <div class="flex gap-3"><button onclick="closeConfirmHapus()" class="btn-secondary flex-1"><i class="fas fa-arrow-left text-xs mr-1.5"></i>Batal</button><button id="btn-confirm-hapus" onclick="doHapusUser()" class="btn-danger flex-1 flex items-center justify-center gap-2"><i class="fas fa-trash-alt"></i> Ya, Hapus</button></div>
+  </div>
+</div>
+
+<div id="action-confirm-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card" style="max-width:420px;">
+    <div class="text-center mb-6"><div class="modal-danger-icon"><i class="fas fa-triangle-exclamation text-rose-600 text-2xl"></i></div><h3 id="action-confirm-title" class="text-xl font-extrabold text-slate-900">Konfirmasi</h3><p id="action-confirm-message" class="text-sm text-slate-500 mt-2"></p></div>
+    <div class="flex gap-3"><button onclick="closeActionConfirm()" class="btn-secondary flex-1"><i class="fas fa-arrow-left text-xs mr-1.5"></i>Batal</button><button id="btn-action-confirm" onclick="submitActionConfirm()" class="btn-danger flex-1 flex items-center justify-center gap-2"><i class="fas fa-check"></i> Ya</button></div>
+  </div>
+</div>
+
+<div id="edit-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card">
+    <div class="flex items-center justify-between mb-6"><div><p class="text-xs font-bold uppercase tracking-widest text-blue-600">Admin</p><h3 class="text-lg font-extrabold text-slate-900">Edit Jam Absensi</h3></div><button onclick="closeEditModal()" class="h-9 w-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200"><i class="fas fa-times"></i></button></div>
+    <input type="hidden" id="edit-doc-id">
+    <div class="space-y-4">
+      <div class="rounded-2xl border border-rose-100 bg-rose-50 p-3 flex items-center justify-between"><div class="flex items-center gap-2 text-rose-700"><i class="fas fa-triangle-exclamation text-sm"></i><span class="text-xs font-semibold">Hapus data absensi ini secara permanen?</span></div><button onclick="deleteAbsensi()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600 text-white hover:bg-rose-700 transition"><i class="fas fa-trash-alt text-[10px]"></i> Hapus</button></div>
+      <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Clock In <span class="text-rose-500">*</span></label><input type="datetime-local" id="edit-clock-in" class="input-field"></div>
+      <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Clock Out</label><input type="datetime-local" id="edit-clock-out" class="input-field"></div>
+      <div class="flex gap-3 pt-2"><button onclick="closeEditModal()" class="btn-secondary flex-1">Batal</button><button onclick="saveEditAbsensi()" class="btn-primary flex-1">Simpan</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="editcuti-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card">
+    <div class="flex items-center justify-between mb-6"><div><p class="text-xs font-bold uppercase tracking-widest text-blue-600">Admin</p><h3 class="text-lg font-extrabold text-slate-900">Edit Status Cuti</h3></div><button onclick="closeEditCutiModal()" class="h-9 w-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200"><i class="fas fa-times"></i></button></div>
+    <input type="hidden" id="editcuti-doc-id">
+    <div class="space-y-4">
+      <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Status <span class="text-rose-500">*</span></label><select id="editcuti-status" class="input-field pr-10"><option value="Pending">Pending</option><option value="Approved">Approved</option><option value="Rejected">Rejected</option></select></div>
+      <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Catatan Admin</label><textarea id="editcuti-catatan" rows="3" class="input-field resize-none" placeholder="Contoh: Disetujui."></textarea></div>
+      <div class="flex gap-3 pt-2"><button onclick="closeEditCutiModal()" class="btn-secondary flex-1">Batal</button><button id="btn-save-editcuti" onclick="saveEditCuti()" class="btn-primary flex-1 flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit User Modal (Nama & Jabatan) -->
+<div id="edit-user-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card" style="max-width:420px;">
+    <div class="flex items-center justify-between mb-6">
+      <div><p class="text-xs font-bold uppercase tracking-widest text-blue-600">Admin · Edit Data User</p><h3 class="text-lg font-extrabold text-slate-900">Ubah Nama & Jabatan</h3></div>
+      <button onclick="closeEditUserModal()" class="h-9 w-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200"><i class="fas fa-times"></i></button>
+    </div>
+    <input type="hidden" id="edit-user-uid">
+    <div class="space-y-4">
+      <div class="bg-blue-50 border border-blue-100 rounded-2xl p-4">
+        <p class="text-xs font-bold text-blue-700 uppercase tracking-widest mb-1">Email</p>
+        <p id="edit-user-email-display" class="font-mono text-slate-700 text-sm"></p>
+      </div>
+      <div>
+        <label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama <span class="text-rose-500">*</span></label>
+        <input id="edit-user-nama-input" type="text" class="input-field" placeholder="Nama karyawan">
+      </div>
+      <div>
+        <label class="mb-1.5 block text-sm font-semibold text-slate-600">Jabatan <span class="text-rose-500">*</span></label>
+        <select id="edit-user-jabatan" class="input-field pr-10">
+          <option value="" disabled selected>-- Pilih Jabatan --</option>
+          <option value="Magang">Magang</option>
+          <option value="Pelayan">Pelayan</option>
+          <option value="Koki">Koki</option>
+          <option value="HRD">HRD</option>
+          <option value="Boss">Boss</option>
+        </select>
+      </div>
+      <div class="flex gap-3 pt-2">
+        <button onclick="closeEditUserModal()" class="btn-secondary flex-1">Batal</button>
+        <button id="btn-save-edit-user" onclick="saveEditUser()" class="btn-primary flex-1 flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- NEW: Edit Item Inventaris Modal -->
+<div id="edit-inv-item-modal" style="display:none" class="modal-backdrop">
+  <div class="modal-card" style="max-width:480px;">
+    <div class="flex items-center justify-between mb-6">
+      <div><p class="text-xs font-bold uppercase tracking-widest text-emerald-600">Admin · Inventaris</p><h3 class="text-lg font-extrabold text-slate-900">Edit Item</h3></div>
+      <button onclick="closeEditInvItemModal()" class="h-9 w-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200"><i class="fas fa-times"></i></button>
+    </div>
+    <input type="hidden" id="edit-inv-item-id">
+    <div class="space-y-4">
+      <div>
+        <label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama Barang <span class="text-rose-500">*</span></label>
+        <input id="edit-inv-item-nama" type="text" class="input-field" placeholder="Contoh: Anggur">
+      </div>
+      <div>
+        <label class="mb-2 block text-sm font-semibold text-slate-600">Lokasi <span class="text-rose-500">*</span></label>
+        <div class="space-y-2">
+          <label class="lokasi-checkbox-label" id="lbl-edit-kulkas">
+            <input type="checkbox" id="edit-inv-lokasi-kulkas" onchange="this.closest('.lokasi-checkbox-label').classList.toggle('checked',this.checked)">
+            <i class="fas fa-snowflake text-sky-500 text-sm"></i> Kulkas
+          </label>
+          <label class="lokasi-checkbox-label" id="lbl-edit-brangkas">
+            <input type="checkbox" id="edit-inv-lokasi-brangkas" onchange="this.closest('.lokasi-checkbox-label').classList.toggle('checked',this.checked)">
+            <i class="fas fa-vault text-indigo-500 text-sm"></i> Brangkas
+          </label>
+        </div>
+      </div>
+      <div class="flex gap-3 pt-2">
+        <button onclick="closeEditInvItemModal()" class="btn-secondary flex-1">Batal</button>
+        <button id="btn-save-edit-inv-item" onclick="saveEditInvItem()" class="btn-primary flex-1 flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- APP SCREEN -->
+<div id="app-screen" style="display:none">
+  <div id="sidebar-overlay" onclick="closeSidebar()" class="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm"></div>
+
+  <aside id="sidebar" class="fixed left-0 top-0 bottom-0 z-50 w-72 bg-white shadow-2xl shadow-slate-900/20 flex flex-col">
+    <div class="p-5 border-b border-slate-100">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-3"><img src="5.png" alt="Logo Mangku Resto" class="h-10 w-10 object-contain"><div><p class="text-[10px] font-bold uppercase tracking-[0.28em] text-teal-700">Menu</p><h2 class="text-base font-extrabold tracking-tight text-slate-900">Mangku Resto</h2></div></div>
+        <button onclick="closeSidebar()" class="h-8 w-8 flex items-center justify-center rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 transition"><i class="fas fa-times text-sm"></i></button>
+      </div>
+      <div class="flex items-center gap-3 bg-slate-50 rounded-2xl px-3 py-2.5"><div class="h-9 w-9 rounded-xl bg-teal-100 flex items-center justify-center text-teal-700 font-black text-sm flex-shrink-0"><i class="fas fa-user text-xs"></i></div><div class="min-w-0"><p id="user-display-name" class="text-sm font-bold text-slate-900 truncate">—</p><span id="user-role-badge" class="text-[10px] font-bold uppercase tracking-widest text-teal-700">—</span></div></div>
+    </div>
+    <nav class="flex-1 p-4 overflow-y-auto">
+      <p class="section-header">Absensi</p>
+      <div class="nav-item" id="nav-absensi" style="display:none" onclick="showPage('absensi')"><div class="nav-icon"><i class="fas fa-fingerprint"></i></div><span>Absensi Harian</span></div>
+      <div class="nav-item" id="nav-rekap" onclick="showPage('rekap')"><div class="nav-icon"><i class="fas fa-chart-bar"></i></div><span>Rekap Absensi</span></div>
+      <div class="nav-item" id="nav-rekap-gaji" onclick="showPage('rekap-gaji')"><div class="nav-icon"><i class="fas fa-money-bill-wave"></i></div><span>Rekap Gaji</span></div>
+      <p class="section-header" id="section-inventaris-nav">Inventaris</p>
+      <div id="inventaris-nav-slot">
+        <div id="inventaris-nav-items">
+          <div class="nav-item" id="nav-inv-wd" onclick="showPage('inv-wd')"><div class="nav-icon"><i class="fas fa-right-left"></i></div><span>Wd &amp; Deposit</span></div>
+          <div class="nav-item" id="nav-inv-stok" onclick="showPage('inv-stok')"><div class="nav-icon"><i class="fas fa-warehouse"></i></div><span>Hasil Akhir</span></div>
+          <div class="nav-item" id="nav-inv-kalkulator" onclick="showPage('inv-kalkulator')"><div class="nav-icon"><i class="fas fa-calculator"></i></div><span>Kalkulator Crafting</span></div>
+          <div class="nav-item" id="nav-laporan-masak" onclick="showPage('laporan-masak')"><div class="nav-icon"><i class="fas fa-kitchen-set"></i></div><span>Laporan Masak</span></div>
+          <div class="nav-item" id="nav-history-masak" onclick="showPage('history-masak')"><div class="nav-icon"><i class="fas fa-clock-rotate-left"></i></div><span>History Masak</span></div>
+        </div>
+      </div>
+      <p class="section-header" id="section-penjualan-nav">Penjualan</p>
+      <div class="nav-item" id="nav-rekap-penjualan" onclick="showPage('rekap-penjualan')"><div class="nav-icon"><i class="fas fa-cash-register"></i></div><span>Rekap Penjualan</span></div>
+      <div class="nav-item" id="nav-history-penjualan" onclick="showPage('history-penjualan')"><div class="nav-icon"><i class="fas fa-receipt"></i></div><span>History Rekap Penjualan</span></div>
+      <div class="nav-item" id="nav-ranking-penjualan" onclick="showPage('ranking-penjualan')"><div class="nav-icon"><i class="fas fa-ranking-star"></i></div><span>Ranking Penjualan</span></div>
+      <p class="section-header">Cuti &amp; Izin</p>
+      <div class="nav-item" id="nav-cuti" style="display:none" onclick="showPage('cuti')"><div class="nav-icon"><i class="fas fa-calendar-minus"></i></div><span>Pengajuan Cuti</span></div>
+      <div class="nav-item" id="nav-statuscuti" onclick="showPage('statuscuti')"><div class="nav-icon"><i class="fas fa-clipboard-list"></i></div><span>Status Cuti</span></div>
+      <p class="section-header" id="section-admin-nav">Admin</p>
+      <div id="admin-inventaris-nav-slot"></div>
+      <div class="nav-item" id="nav-kelola" style="display:none" onclick="showPage('kelola')"><div class="nav-icon"><i class="fas fa-users-gear"></i></div><span>Kelola Akun</span></div>
+      <div class="nav-item" id="nav-log-barang" style="display:none" onclick="showPage('log-barang')"><div class="nav-icon"><i class="fas fa-clipboard-list"></i></div><span>Log Barang</span></div>
+      <!-- NEW NAV ITEM -->
+      <div class="nav-item" id="nav-kelola-item-inv" style="display:none" onclick="showPage('kelola-item-inv')"><div class="nav-icon" style="background:#ecfdf5;color:#059669;"><i class="fas fa-boxes-stacked"></i></div><span>Add Item</span></div>
+      <p class="section-header">Akun</p>
+      <div class="nav-item" id="nav-ganti-password" onclick="showPage('ganti-password')"><div class="nav-icon"><i class="fas fa-key"></i></div><span>Ganti Password</span></div>
+      <div class="nav-item" onclick="doLogout()" style="color:#ef4444;"><div class="nav-icon" style="background:#fef2f2;color:#ef4444;"><i class="fas fa-sign-out-alt"></i></div><span>Keluar</span></div>
+    </nav>
+    <div class="p-4 border-t border-slate-100"><p class="text-[11px] text-slate-400 font-semibold text-center">&copy; 2026 Mangku Resto · Local Mode</p></div>
+  </aside>
+
+  <div class="min-h-screen flex flex-col">
+    <nav class="glass sticky top-0 z-30 border-b border-white/70 px-4 py-4 shadow-sm shadow-slate-200/60 md:px-6">
+      <div class="mx-auto flex max-w-6xl items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+          <button onclick="openSidebar()" class="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 transition flex-shrink-0"><i class="fas fa-bars text-sm"></i></button>
+          <div class="flex items-center gap-3"><img src="5.png" alt="Logo Mangku Resto" class="h-10 w-10 object-contain flex-shrink-0"><div><p class="text-[10px] font-bold uppercase tracking-[0.28em] text-teal-700">Mangku Resto</p><h1 id="page-title" class="text-lg font-extrabold tracking-tight text-slate-900">Dashboard</h1></div></div>
+        </div>
+        <span id="current-date" class="hidden text-sm font-semibold text-slate-600 md:block"></span>
+      </div>
+    </nav>
+
+    <main class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6">
+
+      <!-- ABSENSI HARIAN -->
+      <div id="page-absensi" class="page">
+        <section class="grid gap-4 lg:grid-cols-2">
+          <div class="space-y-4">
+            <div class="glass rounded-[28px] border border-white/70 p-6 shadow-xl shadow-slate-200/50">
+              <div class="mb-5 flex items-start justify-between gap-4"><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-teal-700">Identitas Pegawai</p><h2 class="mt-1 text-lg font-extrabold tracking-tight text-slate-900">Data Karyawan</h2></div><div class="rounded-2xl bg-teal-50 p-3 text-teal-700"><i class="fas fa-user-check"></i></div></div>
+              <div class="space-y-4">
+                <div id="absensi-select-wrap" style="display:none"><label class="mb-2 block text-sm font-semibold text-slate-600">Pilih Nama Pegawai</label><select id="select-nama" class="input-field pr-10"><option value="" selected disabled>-- Pilih Nama --</option></select></div>
+                <div id="absensi-self-info" class="rounded-2xl bg-teal-50 border border-teal-100 p-4"><p class="text-xs font-bold uppercase tracking-widest text-teal-700 mb-2">Karyawan Login</p><p class="font-extrabold text-slate-900 text-lg" id="self-nama">—</p><div class="flex gap-3 mt-1"><span class="text-xs font-semibold text-slate-500" id="self-jabatan">—</span><span class="text-xs font-semibold text-teal-600" id="self-id">—</span></div></div>
+              </div>
+            </div>
+            <div class="overflow-hidden rounded-[28px] bg-slate-950 p-6 text-white shadow-2xl shadow-slate-300/50">
+              <div class="relative"><div class="mb-3 flex items-center justify-between"><div><p class="text-[11px] font-bold uppercase tracking-[0.28em] text-teal-300">Waktu Real-time</p><p class="mt-1 text-sm text-slate-400">Zona waktu: Asia/Jakarta</p></div><div class="relative"><span class="pulse-ring absolute inset-0 rounded-full bg-emerald-400"></span><span class="relative block h-3 w-3 rounded-full bg-emerald-400"></span></div></div><h2 id="live-clock" class="text-5xl font-black tracking-tight tabular-nums md:text-6xl">--:--:--</h2><p id="current-date-clock" class="mt-3 text-sm font-medium text-slate-300"></p></div>
+            </div>
+          </div>
+          <div class="space-y-4">
+            <div class="grid gap-4 md:grid-cols-2">
+              <button id="btn-clock-in" onclick="handleClockIn()" class="group flex items-center gap-5 rounded-[28px] border border-emerald-200 bg-white p-6 text-left shadow-xl shadow-emerald-100/50 transition duration-300 hover:-translate-y-0.5 hover:bg-emerald-600"><div class="rounded-2xl bg-emerald-100 p-4 text-emerald-700 transition group-hover:bg-white group-hover:text-emerald-600"><i class="fas fa-sign-in-alt text-2xl"></i></div><div class="flex-1"><span class="block text-xl font-black tracking-tight text-slate-900 group-hover:text-white">Clock In</span><span class="text-sm font-medium text-slate-500 group-hover:text-emerald-50">Catat kehadiran masuk</span></div></button>
+              <button id="btn-clock-out" onclick="handleClockOut()" class="group flex items-center gap-5 rounded-[28px] border border-rose-200 bg-white p-6 text-left shadow-xl shadow-rose-100/50 transition duration-300 hover:-translate-y-0.5 hover:bg-rose-600"><div class="rounded-2xl bg-rose-100 p-4 text-rose-700 transition group-hover:bg-white group-hover:text-rose-600"><i class="fas fa-sign-out-alt text-2xl"></i></div><div class="flex-1"><span class="block text-xl font-black tracking-tight text-slate-900 group-hover:text-white">Clock Out</span><span class="text-sm font-medium text-slate-500 group-hover:text-rose-50">Catat waktu pulang</span></div></button>
+            </div>
+            <div class="glass rounded-[28px] border border-white/70 p-6 shadow-xl shadow-slate-200/50"><p class="text-xs font-bold uppercase tracking-[0.25em] text-slate-400 mb-4">Panduan Absensi</p><div class="space-y-3"><div class="flex items-start gap-3"><div class="h-7 w-7 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 text-xs flex-shrink-0 mt-0.5"><i class="fas fa-1"></i></div><p class="text-sm text-slate-600 font-medium">Tekan Clock In saat tiba di tempat kerja</p></div><div class="flex items-start gap-3"><div class="h-7 w-7 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 text-xs flex-shrink-0 mt-0.5"><i class="fas fa-2"></i></div><p class="text-sm text-slate-600 font-medium">Tekan Clock Out saat hendak pulang. Bisa Clock In lebih dari 1x per hari.</p></div></div></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- REKAP ABSENSI -->
+      <div id="page-rekap" class="page">
+        <div class="glass rounded-[24px] border border-white/70 p-5 shadow-xl shadow-slate-200/50 mb-5">
+          <div class="flex flex-wrap items-end gap-3">
+            <div id="rekap-filter-nama-wrap" class="flex-1 min-w-[150px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Nama Karyawan</label><select id="rekap-filter-nama" class="input-field pr-10"><option value="">Semua Karyawan</option></select></div>
+            <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Dari Tanggal</label><input type="date" id="rekap-dari" class="input-field"></div>
+            <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Sampai Tanggal</label><input type="date" id="rekap-sampai" class="input-field"></div>
+            <button id="btn-rekap-tampilkan" onclick="loadRekap()" class="btn-primary flex items-center gap-2 whitespace-nowrap"><i class="fas fa-rotate-right text-xs"></i> Refresh</button>
+            <button onclick="resetRekap()" class="btn-secondary flex items-center gap-2 whitespace-nowrap"><i class="fas fa-rotate-left text-xs"></i> Reset</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+          <div class="stat-card"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Total Hadir</p><p id="stat-total-hadir" class="text-3xl font-black text-slate-900">—</p><p class="text-xs text-slate-400 mt-1 font-medium">sesi absensi</p></div>
+          <div class="stat-card"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Total Jam</p><p id="stat-total-jam" class="text-3xl font-black text-teal-700">—</p><p class="text-xs text-slate-400 mt-1 font-medium">jam kerja</p></div>
+          <div class="stat-card"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Rata-rata/Sesi</p><p id="stat-avg-jam" class="text-3xl font-black text-blue-600">—</p><p class="text-xs text-slate-400 mt-1 font-medium">jam per sesi</p></div>
+          <div class="stat-card"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Karyawan</p><p id="stat-jumlah-karyawan" class="text-3xl font-black text-violet-600">—</p><p class="text-xs text-slate-400 mt-1 font-medium">dalam filter</p></div>
+        </div>
+        <div class="glass rounded-[24px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden">
+          <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between"><div><h3 class="font-extrabold text-slate-900">Data Absensi</h3><p id="rekap-count-label" class="text-xs text-slate-400 font-medium mt-0.5">Belum dimuat</p></div><div id="rekap-loading" style="display:none"><div class="loading-spinner h-5 w-5 rounded-full border-2 border-teal-500 border-t-transparent"></div></div></div>
+          <div class="table-wrapper rounded-none border-0"><table class="data-table w-full border-collapse"><thead><tr><th class="text-left">No</th><th class="text-left">Tanggal</th><th class="text-left">ID</th><th class="text-left">Nama</th><th class="text-left">Jabatan</th><th class="text-left">Clock In</th><th class="text-left">Clock Out</th><th class="text-left">Total Jam</th></tr></thead><tbody id="rekap-tbody"><tr><td colspan="8" class="text-center text-slate-400 py-12"><div class="flex flex-col items-center gap-2"><i class="fas fa-table text-3xl text-slate-200"></i><span class="text-sm font-medium">Gunakan filter di atas untuk menampilkan data</span></div></td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- REKAP GAJI -->
+      <div id="page-rekap-gaji" class="page">
+        <div class="glass rounded-[24px] border border-white/70 p-5 shadow-xl shadow-slate-200/50 mb-5">
+          <div class="flex flex-wrap items-end gap-3">
+            <div id="gaji-filter-nama-wrap" class="flex-1 min-w-[180px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Nama Karyawan</label><select id="gaji-filter-nama" class="input-field pr-10"><option value="">Semua Karyawan</option></select></div>
+            <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Dari Tanggal</label><input type="date" id="gaji-dari" class="input-field"></div>
+            <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Sampai Tanggal</label><input type="date" id="gaji-sampai" class="input-field"></div>
+            <button id="btn-gaji-hitung" onclick="loadRekapGaji()" class="btn-purple flex items-center gap-2 whitespace-nowrap"><i class="fas fa-calculator text-xs"></i> Hitung Gaji</button>
+            <button onclick="resetRekapGaji()" class="btn-secondary flex items-center gap-2 whitespace-nowrap"><i class="fas fa-rotate-left text-xs"></i> Reset</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
+          <div class="stat-card admin-only-gaji"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Total Karyawan</p><p id="gaji-stat-karyawan" class="text-3xl font-black text-violet-600">—</p></div>
+          <div class="stat-card"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Total Jam Kerja</p><p id="gaji-stat-jam" class="text-3xl font-black text-teal-700">—</p></div>
+          <div class="stat-card col-span-2 md:col-span-1"><p class="text-xs font-bold uppercase tracking-[0.18em] text-slate-400 mb-2">Total Gaji</p><p id="gaji-stat-total" class="text-2xl font-black text-emerald-600">—</p></div>
+        </div>
+        <div class="glass rounded-[24px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden mb-5">
+          <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between"><div><h3 class="font-extrabold text-slate-900">Rekap Gaji Karyawan</h3><p id="gaji-count-label" class="text-xs text-slate-400 font-medium mt-0.5">Belum dimuat</p></div><div id="gaji-loading" style="display:none"><div class="loading-spinner h-5 w-5 rounded-full border-2 border-violet-500 border-t-transparent"></div></div></div>
+          <div class="table-wrapper rounded-none border-0"><table class="data-table gaji-table w-full border-collapse"><thead><tr><th class="text-left">No</th><th class="text-left">Nama</th><th class="text-left">Jabatan</th><th class="text-left">Total Sesi</th><th class="text-left">Total Jam</th><th class="text-left">Rate/24 Jam</th><th class="text-left">Keterangan</th><th class="text-left">Total Gaji</th><th class="admin-only-gaji text-center">Done</th></tr></thead><tbody id="gaji-tbody"><tr><td colspan="9" class="text-center text-slate-400 py-12"><i class="fas fa-money-bill-wave text-3xl text-slate-200 block mb-2"></i>Pilih periode dan tekan Hitung Gaji</td></tr></tbody></table></div>
+        </div>
+        <div class="glass rounded-[24px] border border-white/70 p-6 shadow-xl shadow-slate-200/50 admin-only-gaji">
+          <div class="flex items-center justify-between mb-4"><div><h3 class="font-extrabold text-slate-900">Template Rekap Gaji</h3><p class="text-xs text-slate-400 font-medium mt-0.5">Centang tabel untuk tandai DONE. Tekan copy untuk salin.</p></div><button onclick="copyGajiText()" class="btn-secondary flex items-center gap-2"><i class="fas fa-copy text-xs"></i> Copy</button></div>
+          <textarea id="gaji-textbox" readonly placeholder="Hitung gaji terlebih dahulu..."></textarea>
+        </div>
+      </div>
+
+      <!-- PENGAJUAN CUTI -->
+      <div id="page-cuti" class="page">
+        <div class="max-w-2xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-calendar-minus text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-amber-600">Form Pengajuan</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Pengajuan Cuti / Izin</h2></div></div>
+            <div class="space-y-4">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama Karyawan <span class="text-rose-500">*</span></label><select id="cuti-select-nama" class="input-field pr-10" onchange="onCutiNamaChange()"><option value="" disabled selected>-- Pilih Nama --</option></select></div>
+              <div class="grid grid-cols-2 gap-3"><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">ID Karyawan</label><input id="cuti-id" type="text" readonly class="input-field" placeholder="Otomatis"></div><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jabatan</label><input id="cuti-jabatan" type="text" readonly class="input-field" placeholder="Otomatis"></div></div>
+              <div class="grid grid-cols-2 gap-3"><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Tanggal Mulai <span class="text-rose-500">*</span></label><input type="date" id="cuti-dari" class="input-field"></div><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Tanggal Selesai <span class="text-rose-500">*</span></label><input type="date" id="cuti-sampai" class="input-field"></div></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jenis Izin <span class="text-rose-500">*</span></label><select id="cuti-jenis" class="input-field pr-10"><option value="" disabled selected>-- Pilih Jenis --</option><option value="OOC">OOC</option><option value="IC">IC</option></select></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Alasan / Keterangan <span class="text-rose-500">*</span></label><textarea id="cuti-alasan" rows="4" class="input-field resize-none" placeholder="Tuliskan alasan..."></textarea></div>
+              <div class="pt-2"><button id="btn-submit-cuti" onclick="submitCuti()" class="btn-primary w-full flex items-center justify-center gap-2"><i class="fas fa-paper-plane text-sm"></i> Kirim Pengajuan</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STATUS CUTI -->
+      <div id="page-statuscuti" class="page">
+        <div class="glass rounded-[24px] border border-white/70 p-5 shadow-xl shadow-slate-200/50 mb-5">
+          <div class="flex flex-wrap items-end gap-3">
+            <div id="statuscuti-filter-nama-wrap" class="flex-1 min-w-[180px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Filter Nama</label><select id="statuscuti-filter-nama" class="input-field pr-10"><option value="">Semua Karyawan</option></select></div>
+            <div class="flex-1 min-w-[130px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Dari Tanggal</label><input type="date" id="statuscuti-dari" class="input-field"></div>
+            <div class="flex-1 min-w-[130px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Sampai Tanggal</label><input type="date" id="statuscuti-sampai" class="input-field"></div>
+            <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Status</label><select id="statuscuti-filter-status" class="input-field pr-10"><option value="">Semua Status</option><option value="Pending">Pending</option><option value="Approved">Approved</option><option value="Rejected">Rejected</option></select></div>
+            <button onclick="loadStatusCuti()" class="btn-primary flex items-center gap-2 whitespace-nowrap"><i class="fas fa-rotate-right text-xs"></i> Refresh</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-3 mb-5">
+          <div class="stat-card text-center"><div class="h-10 w-10 rounded-xl bg-amber-100 flex items-center justify-center text-amber-600 mx-auto mb-2"><i class="fas fa-clock"></i></div><p id="cuti-stat-pending" class="text-2xl font-black text-amber-600">—</p><p class="text-xs font-semibold text-slate-400 mt-1">Pending</p></div>
+          <div class="stat-card text-center"><div class="h-10 w-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 mx-auto mb-2"><i class="fas fa-check-circle"></i></div><p id="cuti-stat-approved" class="text-2xl font-black text-emerald-600">—</p><p class="text-xs font-semibold text-slate-400 mt-1">Approved</p></div>
+          <div class="stat-card text-center"><div class="h-10 w-10 rounded-xl bg-rose-100 flex items-center justify-center text-rose-600 mx-auto mb-2"><i class="fas fa-times-circle"></i></div><p id="cuti-stat-rejected" class="text-2xl font-black text-rose-600">—</p><p class="text-xs font-semibold text-slate-400 mt-1">Rejected</p></div>
+        </div>
+        <div class="glass rounded-[24px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden">
+          <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between"><div><h3 class="font-extrabold text-slate-900">Riwayat Pengajuan Cuti</h3><p id="statuscuti-count-label" class="text-xs text-slate-400 font-medium mt-0.5">Belum dimuat</p></div><div id="statuscuti-loading" style="display:none"><div class="loading-spinner h-5 w-5 rounded-full border-2 border-amber-500 border-t-transparent"></div></div></div>
+          <div class="table-wrapper rounded-none border-0"><table class="data-table w-full border-collapse"><thead><tr><th class="text-left">No</th><th class="text-left">Tgl Pengajuan</th><th class="text-left">Nama</th><th class="text-left">Jenis</th><th class="text-left">Tgl Mulai</th><th class="text-left">Tgl Selesai</th><th class="text-left">Alasan</th><th class="text-left">Status</th><th class="text-left">Catatan/Aksi</th></tr></thead><tbody id="statuscuti-tbody"><tr><td colspan="9" class="text-center text-slate-400 py-12"><i class="fas fa-spinner fa-spin text-xl block mb-2"></i>Memuat data...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- KELOLA AKUN -->
+      <div id="page-kelola" class="page">
+        <div class="grid lg:grid-cols-2 gap-6">
+          <div class="glass rounded-[28px] border border-white/70 p-6 shadow-xl shadow-slate-200/50">
+            <div class="mb-5 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-user-plus text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-widest text-violet-700">Buat Akun Baru</p><h2 class="text-lg font-extrabold text-slate-900">Tambah Pengguna</h2><p class="text-xs text-slate-500 mt-0.5">Password default: <code class="bg-slate-100 px-1.5 py-0.5 rounded font-bold text-slate-700">absen123</code></p></div></div>
+            <div class="space-y-3">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama Lengkap <span class="text-rose-500">*</span></label><input id="akun-nama" type="text" class="input-field" placeholder="Nama karyawan" oninput="onNamaInput()"></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Username / Email <span class="text-rose-500">*</span></label><input id="akun-username" type="text" class="input-field" placeholder="username atau email lengkap" oninput="updateEmailPreview()"><p id="akun-email-preview" class="text-xs text-teal-600 font-semibold mt-1.5"></p><p class="text-xs text-slate-400 mt-0.5">Username otomatis terisi dari nama.</p></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Role <span class="text-rose-500">*</span></label><select id="akun-role" class="input-field pr-10"><option value="" disabled selected>-- Pilih Role --</option><option value="staff">Karyawan</option><option value="admin">Admin</option></select></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">ID Karyawan</label><input id="akun-id-karyawan" type="text" class="input-field" placeholder="Contoh: K001"></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jabatan</label><select id="akun-jabatan" class="input-field pr-10"><option value="" disabled selected>-- Pilih Jabatan --</option><option value="Magang">Magang</option><option value="Pelayan">Pelayan</option><option value="Koki">Koki</option><option value="HRD">HRD</option><option value="Boss">Boss</option></select></div>
+              <div class="pt-1"><button id="btn-buat-akun" onclick="buatAkun()" class="btn-purple w-full flex items-center justify-center gap-2"><i class="fas fa-plus"></i> Buat Akun</button></div>
+            </div>
+          </div>
+          <div class="glass rounded-[28px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100"><h3 class="font-extrabold text-slate-900">Daftar Pengguna</h3><p class="text-xs text-slate-400 mt-0.5">Klik Hapus untuk menghapus akun dari sistem</p></div>
+            <div class="table-wrapper rounded-none border-0"><table class="data-table w-full border-collapse"><thead><tr><th class="text-left !text-white font-extrabold" style="background:#7c3aed">No</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">Nama</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">Email</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">Role</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">ID</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">Jabatan</th><th class="text-left !text-white font-extrabold" style="background:#7c3aed">Aksi</th></tr></thead><tbody id="akun-tbody"><tr><td colspan="7" class="text-center py-8 text-slate-400">Memuat...</td></tr></tbody></table></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- IMPORT ABSENSI -->
+      <div id="page-import-absensi" class="page">
+        <div class="max-w-3xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-file-import text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-blue-600">Admin Only</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Import Absensi JSON</h2></div></div>
+            <div class="mb-5 rounded-2xl bg-blue-50 border border-blue-100 p-4">
+              <p class="text-xs font-bold text-blue-700 uppercase tracking-widest mb-2">Format JSON</p>
+              <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs text-blue-800 font-mono">
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"tanggal":</span> "DD/MM/YYYY"</div>
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"id_karyawan":</span> "K001"</div>
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"nama":</span> "Nama"</div>
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"jabatan":</span> "Bartender"</div>
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"clock_in":</span> "HH:mm:ss"</div>
+                <div class="bg-white/70 rounded-lg px-2.5 py-1.5"><span class="text-blue-400">"clock_out":</span> "HH:mm:ss"</div>
+              </div>
+            </div>
+            <div class="mb-4">
+              <div class="flex items-center justify-between mb-2"><label class="text-sm font-semibold text-slate-600">Data JSON <span class="text-rose-500">*</span></label><button onclick="clearImportJson()" class="text-xs font-semibold text-slate-400 hover:text-rose-500 transition flex items-center gap-1"><i class="fas fa-trash-alt text-[10px]"></i> Bersihkan</button></div>
+              <textarea id="import-absensi-json" placeholder='[&#10;  {&#10;    "tanggal": "01/05/2026",&#10;    "id_karyawan": "K004",&#10;    "nama": "Nama Karyawan",&#10;    "jabatan": "HRD",&#10;    "clock_in": "18:46:48",&#10;    "clock_out": "18:58:46",&#10;    "total_jam": "0:11:57"&#10;  }&#10;]'></textarea>
+            </div>
+            <div id="import-absensi-result" style="display:none"></div>
+            <div class="flex gap-3 mt-5">
+              <button onclick="clearImportJson()" class="btn-secondary flex items-center gap-2"><i class="fas fa-rotate-left text-xs"></i> Reset</button>
+              <button id="btn-import-absensi" onclick="submitImportAbsensi()" class="btn-primary flex-1 flex items-center justify-center gap-2"><i class="fas fa-upload"></i> Import ke Firestore</button>
+            </div>
+            <div class="mt-4 rounded-2xl border border-amber-100 bg-amber-50 p-3 text-xs font-medium text-amber-700 flex items-start gap-2"><i class="fas fa-circle-info flex-shrink-0 mt-0.5"></i><span>Data yang diimport bersifat permanen.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RESET ABSENSI -->
+      <div id="page-reset-absensi" class="page">
+        <div class="max-w-2xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-rotate-left text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-rose-600">Admin Only</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Reset Absensi</h2></div></div>
+            <div class="grid gap-4 md:grid-cols-2"><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Dari Tanggal <span class="text-rose-500">*</span></label><input id="reset-absensi-dari" type="date" class="input-field"></div><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Sampai Tanggal <span class="text-rose-500">*</span></label><input id="reset-absensi-sampai" type="date" class="input-field"></div></div>
+            <div class="mt-5 rounded-2xl border border-rose-100 bg-rose-50 p-4 text-xs font-medium text-rose-700">Semua data pada rentang tanggal terpilih akan dihapus permanen.</div>
+            <div class="pt-5"><button id="btn-reset-absensi" onclick="submitResetAbsensi()" class="btn-danger w-full flex items-center justify-center gap-2"><i class="fas fa-trash-alt"></i> Submit</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- GANTI PASSWORD -->
+      <div id="page-ganti-password" class="page">
+        <div class="max-w-md mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-slate-600 to-slate-800 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-key text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-slate-600">Keamanan Akun</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Ganti Password</h2><p class="text-sm text-slate-500 mt-0.5">Password minimal 6 karakter</p></div></div>
+            <div class="space-y-4">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Password Lama <span class="text-rose-500">*</span></label><div class="relative"><input id="pass-lama" type="password" class="input-field" placeholder="Password saat ini"><button type="button" onclick="togglePassVis('pass-lama',this)" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><i class="fas fa-eye text-sm"></i></button></div></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Password Baru <span class="text-rose-500">*</span></label><div class="relative"><input id="pass-baru" type="password" class="input-field" placeholder="Password baru" oninput="checkPassMatch()"><button type="button" onclick="togglePassVis('pass-baru',this)" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><i class="fas fa-eye text-sm"></i></button></div></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Ulangi Password Baru <span class="text-rose-500">*</span></label><div class="relative"><input id="pass-ulang" type="password" class="input-field" placeholder="Ketik ulang password baru" oninput="checkPassMatch()"><button type="button" onclick="togglePassVis('pass-ulang',this)" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><i class="fas fa-eye text-sm"></i></button></div><p id="pass-match-hint" class="text-xs mt-1"></p></div>
+              <div class="pt-2"><button id="btn-ganti-pass" onclick="gantiPassword()" class="btn-primary w-full flex items-center justify-center gap-2"><i class="fas fa-key"></i> Ganti Password</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WD & DEPOSIT -->
+      <div id="page-inv-wd" class="page">
+        <div class="max-w-2xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-14 w-14 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shadow-lg shadow-emerald-200 flex-shrink-0"><i class="fas fa-right-left text-xl"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-emerald-700">Inventaris</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Wd &amp; Deposit Barang</h2><p class="text-sm text-slate-500 mt-0.5">Catat barang masuk (Deposit) atau keluar (WD)</p></div></div>
+            <div class="space-y-5">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Lokasi <span class="text-rose-500">*</span></label><select id="inv-lokasi" class="input-field pr-10"><option value="" disabled selected>-- Pilih Lokasi --</option><option value="Kulkas">Kulkas</option><option value="Brangkas">Brangkas</option></select></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Tipe Transaksi <span class="text-rose-500">*</span></label><div class="grid grid-cols-2 gap-3"><label class="inv-type-option deposit-option flex items-center gap-3 p-3.5 rounded-2xl border-2 border-sky-200 bg-sky-50 cursor-pointer"><input type="radio" name="inv-tipe" value="Deposit" class="accent-sky-600"><div><p class="text-sm font-bold text-sky-800">Deposit</p><p class="text-xs text-sky-600">Barang Masuk</p></div></label><label class="inv-type-option wd-option flex items-center gap-3 p-3.5 rounded-2xl border-2 border-rose-200 bg-rose-50 cursor-pointer"><input type="radio" name="inv-tipe" value="WD" class="accent-rose-600"><div><p class="text-sm font-bold text-rose-800">WD</p><p class="text-xs text-rose-600">Barang Keluar</p></div></label></div></div>
+              <div>
+                <div class="flex items-center justify-between mb-2"><label class="text-sm font-semibold text-slate-600">Daftar Barang <span class="text-rose-500">*</span></label><button type="button" id="btn-add-item" onclick="addInvItemRow()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 transition"><i class="fas fa-plus text-[10px]"></i> Tambah Item</button></div>
+                <div class="flex items-center gap-3 mb-2 px-1"><div class="flex-1 text-xs font-bold uppercase tracking-widest text-slate-400">Nama Barang</div><div class="w-28 text-xs font-bold uppercase tracking-widest text-slate-400 text-center">Jumlah</div><div class="w-10"></div></div>
+                <div id="inv-items-container" class="space-y-2"></div>
+                <p class="text-xs text-slate-400 mt-2"><i class="fas fa-info-circle mr-1"></i>Pilih lokasi terlebih dahulu, lalu klik "Tambah Item".</p>
+              </div>
+              <div class="pt-1 grid grid-cols-2 gap-3"><button type="button" onclick="resetInventarisForm()" class="btn-secondary flex items-center justify-center gap-2"><i class="fas fa-rotate-right"></i> Refresh Form</button><button id="btn-inv-submit" onclick="submitInventaris()" class="btn-primary flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan Transaksi</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HASIL AKHIR / STOK -->
+      <div id="page-inv-stok" class="page">
+        <div class="mb-5 text-center"><p class="text-xs font-bold uppercase tracking-[0.25em] text-emerald-700">Inventaris</p><h2 class="text-2xl font-extrabold tracking-tight text-slate-900">Hasil Akhir Stok</h2></div>
+        <div id="stok-grid" class="grid gap-6 md:grid-cols-2 max-w-7xl mx-auto"><div class="md:col-span-2 text-center py-12 text-slate-400"><i class="fas fa-spinner fa-spin text-2xl"></i></div></div>
+      </div>
+
+      <!-- KALKULATOR CRAFTING -->
+      <div id="page-inv-kalkulator" class="page">
+        <div class="max-w-xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-calculator text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-violet-700">Inventaris</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Kalkulator Crafting</h2></div></div>
+            <div class="space-y-4">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Pilih Menu Paket</label><select id="kalk-menu" class="input-field pr-10" onchange="hitungKalkulator()"><option value="">-- Pilih Menu Paket --</option><option value="biasa">Paket Biasa</option><option value="kenyang">Paket Kenyang</option></select></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jumlah Paket</label><input id="kalk-paket" type="number" min="1" class="input-field" placeholder="Masukkan angka..." oninput="hitungKalkulator()"></div>
+              <div id="kalk-result" style="display:none" class="mt-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-5"><div class="flex items-center justify-between mb-4"><p class="text-sm font-bold text-slate-700">Rincian Bahan</p><span id="kalk-summary" class="text-xs font-bold px-3 py-1 rounded-full bg-emerald-600 text-white"></span></div><div id="kalk-items" class="space-y-2"></div></div>
+              <div class="pt-1"><button onclick="resetKalkulator()" class="btn-secondary w-full flex items-center justify-center gap-2"><i class="fas fa-rotate-left text-xs"></i> Reset</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RESET INVENTARIS -->
+      <div id="page-reset-inventaris" class="page">
+        <div class="max-w-2xl mx-auto">
+          <div class="glass rounded-[28px] border border-white/70 p-6 md:p-8 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-trash-can text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-rose-600">Admin Only</p><h2 class="text-xl font-extrabold tracking-tight text-slate-900">Reset Data Inventaris</h2><p class="text-sm text-slate-500 mt-0.5">Hapus semua log transaksi tanpa mengubah stok akhir.</p></div></div>
+            <div class="space-y-4">
+              <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5"><h3 class="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><i class="fas fa-circle-info text-blue-500"></i> Yang akan terjadi:</h3><div class="space-y-2"><div class="flex items-center gap-3 text-sm text-slate-600"><div class="h-6 w-6 rounded-lg bg-rose-100 flex items-center justify-center flex-shrink-0"><i class="fas fa-times text-rose-600 text-[10px]"></i></div><span>Semua <code class="bg-slate-200 px-1.5 rounded text-xs font-bold">inventaris_logs</code> dihapus permanen</span></div><div class="flex items-center gap-3 text-sm text-slate-600"><div class="h-6 w-6 rounded-lg bg-emerald-100 flex items-center justify-center flex-shrink-0"><i class="fas fa-check text-emerald-600 text-[10px]"></i></div><span>Qty stok akhir <strong>dipertahankan</strong></span></div></div></div>
+              <div class="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs font-medium text-amber-700 flex items-start gap-2"><i class="fas fa-triangle-exclamation flex-shrink-0 mt-0.5"></i><span>Log yang dihapus tidak dapat dikembalikan. Gunakan hanya saat memulai periode baru.</span></div>
+              <button onclick="submitResetInventaris()" class="btn-danger w-full flex items-center justify-center gap-2"><i class="fas fa-trash-can"></i> Hapus Semua Log &amp; Reset Stok</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOG BARANG -->
+      <div id="page-log-barang" class="page">
+        <div class="mb-5 flex items-center justify-between flex-wrap gap-3"><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-rose-600">Admin Only</p><h2 class="text-2xl font-extrabold tracking-tight text-slate-900">Log Barang</h2></div><button id="btn-log-refresh" onclick="refreshLogBarang()" class="btn-secondary flex items-center gap-2 text-sm whitespace-nowrap"><i class="fas fa-rotate-right text-xs"></i> Refresh</button></div>
+        <div class="glass rounded-[24px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden">
+          <div class="table-wrapper rounded-none border-0"><table class="data-table w-full"><thead><tr><th class="text-left" style="min-width:140px;">Waktu</th><th class="text-left" style="min-width:120px;">User</th><th class="text-left" style="min-width:90px;">Tipe</th><th class="text-left" style="min-width:130px;">Barang</th><th class="text-center" style="min-width:80px;">Jumlah</th><th class="text-left" style="min-width:130px;">Lokasi</th><th class="text-left" style="min-width:100px;">Aksi</th></tr></thead><tbody id="log-tbody"><tr><td colspan="7" class="text-center py-8 text-slate-400">Memuat data...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- ══ NEW PAGE: KELOLA ITEM INVENTARIS ══════════════════════ -->
+      <div id="page-kelola-item-inv" class="page">
+        <div class="mb-6 flex items-start gap-4">
+          <div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white shadow-lg flex-shrink-0"><i class="fas fa-boxes-stacked text-lg"></i></div>
+          <div>
+            <p class="text-xs font-bold uppercase tracking-[0.25em] text-emerald-600">Admin Only</p>
+            <h2 class="text-xl font-extrabold tracking-tight text-slate-900">Kelola Item Inventaris</h2>
+            <p class="text-sm text-slate-500 mt-0.5">Tambah, edit, atau hapus item yang tersedia di setiap lokasi gudang.</p>
+          </div>
+        </div>
+
+        <!-- FORM TAMBAH ITEM BARU -->
+        <div class="glass rounded-[24px] border border-white/70 p-6 shadow-xl shadow-slate-200/50 mb-6">
+          <h3 class="font-extrabold text-slate-900 mb-1">Tambah Item Baru</h3>
+          <p class="text-xs text-slate-400 mb-5">Item yang ditambahkan akan langsung tersedia di form WD &amp; Deposit.</p>
+          <div class="grid md:grid-cols-2 gap-5">
+            <div>
+              <label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama Barang <span class="text-rose-500">*</span></label>
+              <input id="new-inv-item-nama" type="text" class="input-field" placeholder="Contoh: Sirup Marjan">
+            </div>
+            <div>
+              <label class="mb-2 block text-sm font-semibold text-slate-600">Tersedia di Lokasi <span class="text-rose-500">*</span></label>
+              <div class="flex flex-wrap gap-2">
+                <label class="lokasi-checkbox-label flex-1 min-w-[140px]">
+                  <input type="checkbox" id="new-inv-lokasi-kulkas" onchange="this.closest('.lokasi-checkbox-label').classList.toggle('checked',this.checked)">
+                  <i class="fas fa-snowflake text-sky-500 text-sm"></i>
+                  <span>Kulkas</span>
+                </label>
+                <label class="lokasi-checkbox-label flex-1 min-w-[120px]">
+                  <input type="checkbox" id="new-inv-lokasi-brangkas" onchange="this.closest('.lokasi-checkbox-label').classList.toggle('checked',this.checked)">
+                  <i class="fas fa-vault text-indigo-500 text-sm"></i>
+                  <span>Brangkas</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="mt-5 flex justify-end">
+            <button id="btn-tambah-inv-item" onclick="submitTambahInvItem()" class="btn-primary flex items-center gap-2">
+              <i class="fas fa-plus"></i> Tambah Item
+            </button>
+          </div>
+        </div>
+
+        <!-- TABEL ITEM YANG ADA -->
+        <div class="glass rounded-[24px] border border-white/70 shadow-xl shadow-slate-200/50 overflow-hidden">
+          <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h3 class="font-extrabold text-slate-900">Daftar Item</h3>
+              <p id="inv-items-count-label" class="text-xs text-slate-400 font-medium mt-0.5">Memuat...</p>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="relative">
+                <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                <input id="inv-items-search" type="text" class="input-field pl-8 py-2 text-sm" style="min-width:200px;padding-top:8px;padding-bottom:8px;" placeholder="Cari nama barang..." oninput="filterInvItemsTable()">
+              </div>
+              <button onclick="loadInvItemsPage()" class="btn-secondary flex items-center gap-2 text-sm whitespace-nowrap">
+                <i class="fas fa-rotate-right text-xs"></i> Refresh
+              </button>
+            </div>
+          </div>
+          <div class="table-wrapper rounded-none border-0">
+            <table class="data-table w-full border-collapse">
+              <thead>
+                <tr>
+                  <th class="text-left" style="min-width:40px;">No</th>
+                  <th class="text-left" style="min-width:180px;">Nama Barang</th>
+                  <th class="text-left" style="min-width:280px;">Lokasi</th>
+                  <th class="text-left" style="min-width:140px;">Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="inv-items-tbody">
+                <tr><td colspan="4" class="text-center py-8 text-slate-400"><i class="fas fa-spinner fa-spin"></i> Memuat...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- INFO -->
+        <div class="hidden">
+          <i class="fas fa-circle-info text-blue-500 mt-0.5 flex-shrink-0"></i>
+          <div class="text-xs text-blue-700 font-medium space-y-1">
+            <p>Menghapus item dari daftar tidak menghapus data stok yang sudah tercatat di Firestore (<code class="bg-blue-100 px-1 rounded">inventaris_stok</code>).</p>
+            <p>Firestore collection yang digunakan: <code class="bg-blue-100 px-1 rounded">inv_items</code> — format dokumen: <code class="bg-blue-100 px-1 rounded">&#123; nama_barang, lokasi: [] &#125;</code></p>
+          </div>
+        </div>
+      </div>
+      <!-- REKAP PENJUALAN -->
+      <div id="page-rekap-penjualan" class="page">
+        <div class="max-w-3xl mx-auto">
+          <div class="glass rounded-[24px] border border-white/70 p-6 shadow-xl shadow-slate-200/50">
+            <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br flex items-center justify-center text-white flex-shrink-0"><i class="fas fa-cash-register text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-sky-600">Penjualan</p><h2 class="text-xl font-extrabold text-slate-900">Rekap Penjualan</h2><p class="text-sm text-slate-500 mt-0.5">Catat satu atau beberapa item dalam satu transaksi.</p></div></div>
+            <div class="grid md:grid-cols-2 gap-4 mb-5">
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama</label><input id="penjualan-nama" class="input-field" readonly></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Tanggal <span class="text-rose-500">*</span></label><input id="penjualan-tanggal" type="date" class="input-field"></div>
+            </div>
+            <div class="flex items-center justify-between mb-3"><div><label class="text-sm font-semibold text-slate-600">Item dan Menu <span class="text-rose-500">*</span></label><p class="text-xs text-slate-400 mt-0.5">Pilih menu dan jumlah yang terjual.</p></div><button type="button" onclick="addSalesItemRow()" class="btn-secondary flex items-center gap-2"><i class="fas fa-plus text-xs"></i> Tambah Item</button></div>
+            <div id="penjualan-items" class="space-y-2"></div>
+            <div class="mt-5 rounded-xl border border-sky-100 bg-sky-50 p-4 flex items-center justify-between"><span class="text-sm font-bold text-slate-600">Total Penjualan</span><strong id="penjualan-total" class="text-xl text-sky-700">Rp 0</strong></div>
+            <button id="btn-submit-penjualan" onclick="submitSales()" class="btn-primary w-full mt-5 flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan Penjualan</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- HISTORY PENJUALAN -->
+      <div id="page-history-penjualan" class="page">
+        <div class="mb-5"><p class="text-xs font-bold uppercase tracking-[0.25em] text-sky-600">Penjualan</p><h2 class="text-2xl font-extrabold text-slate-900">History Rekap Penjualan</h2></div>
+        <div class="glass rounded-[20px] border border-white/70 p-5 shadow-lg mb-5"><div class="flex flex-wrap items-end gap-3">
+          <div class="sales-admin-filter flex-1 min-w-[180px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Nama</label><select id="sales-history-nama" class="input-field"><option value="">Semua Karyawan</option></select></div>
+          <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Dari Tanggal</label><input id="sales-history-dari" type="date" class="input-field"></div>
+          <div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Sampai Tanggal</label><input id="sales-history-sampai" type="date" class="input-field"></div>
+          <button onclick="loadSalesHistory()" class="btn-primary"><i class="fas fa-rotate-right mr-1"></i> Refresh</button>
+        </div></div>
+        <div class="grid md:grid-cols-2 gap-3 mb-5"><div class="stat-card"><p class="text-xs font-bold text-slate-400">TRANSAKSI</p><p id="sales-history-count" class="text-2xl font-black text-slate-900">0</p></div><div class="stat-card"><p class="text-xs font-bold text-slate-400">TOTAL PENJUALAN</p><p id="sales-history-total" class="text-2xl font-black text-sky-700">Rp 0</p></div></div>
+        <div class="glass rounded-[20px] border border-white/70 overflow-hidden shadow-lg"><div class="table-wrapper rounded-none border-0"><table class="data-table w-full"><thead><tr><th class="text-left">Tanggal</th><th class="text-left">Nama</th><th class="text-left">Item</th><th class="text-left">Total</th><th class="sales-admin-col text-left">Aksi</th></tr></thead><tbody id="sales-history-tbody"><tr><td colspan="5" class="text-center py-10 text-slate-400">Memuat...</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- RANKING PENJUALAN -->
+      <div id="page-ranking-penjualan" class="page">
+        <div class="mb-5"><p class="text-xs font-bold uppercase tracking-[0.25em] text-amber-600">Penjualan</p><h2 class="text-2xl font-extrabold text-slate-900">Ranking Penjualan</h2><p class="text-sm text-slate-500 mt-1">Peringkat berdasarkan total nominal penjualan.</p></div>
+        <div class="glass rounded-[20px] border border-white/70 p-5 shadow-lg mb-5"><div class="flex flex-wrap items-end gap-3"><div class="flex-1 min-w-[160px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Dari Tanggal</label><input id="ranking-dari" type="date" class="input-field"></div><div class="flex-1 min-w-[160px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Sampai Tanggal</label><input id="ranking-sampai" type="date" class="input-field"></div><button onclick="loadSalesRanking()" class="btn-primary"><i class="fas fa-rotate-right mr-1"></i> Refresh</button></div></div>
+        <div class="glass rounded-[20px] border border-white/70 overflow-hidden shadow-lg"><div class="table-wrapper rounded-none border-0"><table class="data-table w-full"><thead><tr><th class="text-center">Rank</th><th class="text-left">Nama</th><th class="text-center">Transaksi</th><th class="text-left">Total Penjualan</th></tr></thead><tbody id="ranking-tbody"><tr><td colspan="4" class="text-center py-10 text-slate-400">Memuat...</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- LAPORAN MASAK -->
+      <div id="page-laporan-masak" class="page">
+        <div class="max-w-2xl mx-auto"><div class="glass rounded-[24px] border border-white/70 p-6 shadow-xl shadow-slate-200/50">
+          <div class="mb-6 flex items-start gap-4"><div class="h-12 w-12 rounded-2xl bg-gradient-to-br flex items-center justify-center text-white flex-shrink-0"><i class="fas fa-kitchen-set text-lg"></i></div><div><p class="text-xs font-bold uppercase tracking-[0.25em] text-blue-600">Inventaris</p><h2 class="text-xl font-extrabold text-slate-900">Laporan Masak</h2></div></div>
+          <div class="space-y-4"><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Nama</label><input id="masak-nama" class="input-field" readonly></div><div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Tanggal <span class="text-rose-500">*</span></label><input id="masak-tanggal" type="date" class="input-field"></div><div><div class="flex items-center justify-between mb-2"><label class="text-sm font-semibold text-slate-600">Item dan Qty <span class="text-rose-500">*</span></label><button type="button" onclick="addCookingItemRow()" class="btn-secondary flex items-center gap-2"><i class="fas fa-plus text-xs"></i> Add Item</button></div><div id="masak-items" class="space-y-2"></div></div><button id="btn-submit-masak" onclick="submitCookingReport()" class="btn-primary w-full flex items-center justify-center gap-2"><i class="fas fa-save"></i> Simpan Laporan</button></div>
+        </div></div>
+      </div>
+
+      <!-- HISTORY MASAK -->
+      <div id="page-history-masak" class="page">
+        <div class="mb-5"><p class="text-xs font-bold uppercase tracking-[0.25em] text-blue-600">Inventaris</p><h2 class="text-2xl font-extrabold text-slate-900">History Masak</h2></div>
+        <div class="glass rounded-[20px] border border-white/70 p-5 shadow-lg mb-5"><div class="flex flex-wrap items-end gap-3"><div class="cooking-admin-filter flex-1 min-w-[180px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Nama</label><select id="cooking-history-nama" class="input-field"><option value="">Semua Karyawan</option></select></div><div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Dari Tanggal</label><input id="cooking-history-dari" type="date" class="input-field"></div><div class="flex-1 min-w-[140px]"><label class="mb-1.5 block text-xs font-bold text-slate-500">Sampai Tanggal</label><input id="cooking-history-sampai" type="date" class="input-field"></div><button onclick="loadCookingHistory()" class="btn-primary"><i class="fas fa-rotate-right mr-1"></i> Refresh</button></div></div>
+        <div class="glass rounded-[20px] border border-white/70 overflow-hidden shadow-lg"><div class="table-wrapper rounded-none border-0"><table class="data-table w-full"><thead><tr><th class="text-left">Tanggal</th><th class="text-left">Nama</th><th class="text-left">Item</th><th class="text-center">Qty</th><th class="cooking-admin-col text-left">Aksi</th></tr></thead><tbody id="cooking-history-tbody"><tr><td colspan="5" class="text-center py-10 text-slate-400">Memuat...</td></tr></tbody></table></div></div>
+      </div>
+
+      <!-- ══ END NEW PAGE ══ -->
+
+    </main>
+    <footer class="px-4 py-5 text-center text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400 md:px-6">&copy; 2026 Mangku Resto Dashboard — Local Mode</footer>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const observer = new MutationObserver(() => {
+      const kelolaNav = document.getElementById('nav-kelola');
+      const adminSec  = document.getElementById('section-admin-nav');
+      if (kelolaNav) {
+        const isAdmin = kelolaNav.style.display !== 'none';
+        if (adminSec)  adminSec.style.display  = isAdmin ? '' : 'none';
+      }
+    });
+    const target = document.getElementById('nav-kelola');
+    if (target) observer.observe(target, { attributes: true, attributeFilter: ['style'] });
+  });
+</script>
+</body>
+</html>

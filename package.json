@@ -1,0 +1,24 @@
+{
+  "name": "lprp-resto",
+  "version": "1.0.0",
+  "description": "",
+  "main": "local-backend.js",
+  "scripts": {
+    "start": "node dev-server.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply mangku-resto-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply mangku-resto-db --remote"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "serve": "^14.2.6",
+    "wrangler": "^4.110.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
+  }
+}
