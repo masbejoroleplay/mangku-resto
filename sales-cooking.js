@@ -245,16 +245,12 @@
     if (!tbody) return;
     tbody.innerHTML = '<tr><td colspan="4" class="text-center py-10 text-slate-400"><i class="fas fa-spinner fa-spin"></i> Memuat...</td></tr>';
     try {
-      const snap = await getDocs(collection(db,'penjualan'));
       const from = document.getElementById('ranking-dari')?.value;
       const to = document.getElementById('ranking-sampai')?.value;
-      const aggregate = new Map();
-      snap.docs.map(d=>d.data()).filter(row=>(!from||row.tanggal>=from)&&(!to||row.tanggal<=to)).forEach(row=>{
-        const key=row.id_karyawan||row.user_uid||row.nama;
-        const entry=aggregate.get(key)||{nama:row.nama||'-',total:0,transaksi:0};
-        entry.total+=Number(row.total_nominal||0); entry.transaksi++; aggregate.set(key,entry);
-      });
-      const rows=[...aggregate.values()].sort((a,b)=>b.total-a.total||a.nama.localeCompare(b.nama));
+      const params = new URLSearchParams();
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      const {rows=[]} = await apiRequest(`/api/sales/ranking?${params}`);
       if(!rows.length){tbody.innerHTML='<tr><td colspan="4" class="text-center py-10 text-slate-400">Belum ada data pada periode ini.</td></tr>';return;}
       const medals=['bg-blue-100 text-blue-700','bg-slate-200 text-slate-700','bg-sky-100 text-sky-700'];
       tbody.innerHTML=rows.map((row,index)=>`<tr><td class="text-center"><span class="rank-medal ${medals[index]||'bg-sky-50 text-sky-700'}">${index+1}</span></td><td class="font-bold text-slate-900">${esc(row.nama)}</td><td class="text-center font-semibold">${row.transaksi}</td><td class="font-black text-sky-700">${rupiah(row.total)}</td></tr>`).join('');

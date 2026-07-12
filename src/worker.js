@@ -86,6 +86,22 @@ async function listRows(request,env,user,table,url){
   return result.results.map(row=>decode(table,row));
 }
 
+async function salesRanking(request,env,url){
+  const from=url.searchParams.get('from'),to=url.searchParams.get('to');
+  let sql=`SELECT COALESCE(NULLIF(id_karyawan,''),NULLIF(user_uid,''),nama) AS seller_key,
+    COALESCE(MAX(NULLIF(nama,'')),'-') AS nama, COUNT(*) AS transaksi,
+    COALESCE(SUM(total_nominal),0) AS total
+    FROM penjualan`,args=[],where=[];
+  if(from){where.push('tanggal >= ?');args.push(from)}
+  if(to){where.push('tanggal <= ?');args.push(to)}
+  if(where.length)sql+=' WHERE '+where.join(' AND ');
+  sql+=` GROUP BY seller_key ORDER BY total DESC, nama ASC`;
+  const result=await env.DB.prepare(sql).bind(...args).all();
+  return reply(request,env,{rows:result.results.map(row=>({
+    nama:row.nama,transaksi:Number(row.transaksi||0),total:Number(row.total||0)
+  }))});
+}
+
 async function upsert(env,table,id,data,merge){
   const pk=primary(table),encoded=encode(table,{...data,[pk]:id});
   const keys=Object.keys(encoded); if(!keys.length)throw Object.assign(new Error('Data kosong.'),{status:400});
@@ -201,6 +217,7 @@ export default {async fetch(request,env){
     if(url.pathname==='/api/me')return reply(request,env,{user:{uid:user.uid,email:user.email,...user.profile}});
     if(url.pathname==='/api/attendance'&&request.method==='POST')return await attendanceTransaction(request,env,user);
     if(url.pathname==='/api/inventory/transaction'&&request.method==='POST')return await inventoryTransaction(request,env,user);
+    if(url.pathname==='/api/sales/ranking'&&request.method==='GET')return await salesRanking(request,env,url);
     if(url.pathname.startsWith('/api/inventory/log/')&&request.method==='DELETE')return await deleteInventoryLog(request,env,user,url.pathname.split('/').pop());
     if(url.pathname.startsWith('/api/data/'))return await dataRoute(request,env,user,url);
     if(url.pathname.startsWith('/api/webhooks/')&&request.method==='POST')return await webhookRoute(request,env,user,url.pathname.split('/').pop());
