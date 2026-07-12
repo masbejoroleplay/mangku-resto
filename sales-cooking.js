@@ -123,15 +123,21 @@
     const btn = document.getElementById('btn-submit-penjualan');
     if (btn) btn.disabled = true;
     try {
-      await addDoc(collection(db, 'penjualan'), {
-        user_uid: currentUser.uid,
-        id_karyawan: currentProfile.id_karyawan || '',
-        nama: currentProfile.nama || currentUser.email,
+      const result = await apiRequest('/api/sales/transaction', {
+        method: 'POST',
+        body: JSON.stringify({
         tanggal: date,
-        items,
-        total_nominal: total,
-        created_at: serverTimestamp()
+          items: items.map(({menu,qty}) => ({menu,qty}))
+        })
       });
+      if (!Cache.stok) Cache.stok = [];
+      result.stocks.forEach(stock => {
+        const cached = Cache.stok.find(row => row.lokasi === 'Kulkas' && row.nama_barang === stock.barang);
+        if (cached) cached.jumlah = stock.jumlah;
+        else Cache.stok.push({lokasi:'Kulkas',nama_barang:stock.barang,jumlah:stock.jumlah});
+      });
+      Cache.stokTs = Date.now();
+      Cache.invalidateLog();
       sendToDiscord('penjualan', {
         embeds: [{
           author:{name:'Mangku Resto • Sistem Penjualan'},

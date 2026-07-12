@@ -23,6 +23,10 @@ const WEBHOOK_SECRETS = {
   brangkas:'DISCORD_WEBHOOK_BRANGKAS', penjualan:'DISCORD_WEBHOOK_PENJUALAN',
   laporan_masak:'DISCORD_WEBHOOK_LAPORAN_MASAK', cuti:'DISCORD_WEBHOOK_CUTI'
 };
+const MENU_PRICES = Object.freeze({
+  'Paket Kenyang':175000,'Paket Biasa':65000,'Android':60000,'Iphone':550000,
+  'Radio':15000,'Rokok':10000,'Korek':2000,'Boombox':350000
+});
 
 function cors(request, env) {
   const origin=request.headers.get('Origin')||'';
@@ -102,6 +106,38 @@ async function salesRanking(request,env,url){
   }))});
 }
 
+async function salesTransaction(request,env,user){
+  const {tanggal,items}=await request.json();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(tanggal||''))||!Array.isArray(items)||!items.length)
+    return reply(request,env,{error:'Data penjualan tidak valid.'},400);
+  const merged=new Map();
+  for(const raw of items){
+    const menu=String(raw.menu||'').trim(),qty=Number(raw.qty);
+    if(!MENU_PRICES[menu]||!Number.isInteger(qty)||qty<1)return reply(request,env,{error:'Item penjualan tidak valid.'},400);
+    merged.set(menu,(merged.get(menu)||0)+qty);
+  }
+  const normalized=[...merged].map(([menu,qty])=>({menu,qty,harga_satuan:MENU_PRICES[menu],subtotal:MENU_PRICES[menu]*qty}));
+  const stocks=[];
+  for(const item of normalized){
+    const row=await env.DB.prepare('SELECT id,jumlah FROM inventaris_stok WHERE lokasi=? AND nama_barang=?').bind('Kulkas',item.menu).first();
+    const current=Number(row?.jumlah||0),next=current-item.qty;
+    if(next<0)return reply(request,env,{error:`Stok ${item.menu} tidak mencukupi. Saat ini: ${current}`},409);
+    stocks.push({barang:item.menu,jumlah:next,id:row.id});
+  }
+  const id=crypto.randomUUID(),now=new Date().toISOString();
+  const total=normalized.reduce((sum,item)=>sum+item.subtotal,0);
+  const statements=[env.DB.prepare('INSERT INTO penjualan (id,user_uid,id_karyawan,nama,tanggal,items,total_nominal,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .bind(id,user.uid,user.profile.id_karyawan||'',user.profile.nama||user.email,tanggal,JSON.stringify(normalized),total,now)];
+  for(const stock of stocks){
+    const sold=normalized.find(item=>item.menu===stock.barang).qty;
+    statements.push(env.DB.prepare('UPDATE inventaris_stok SET jumlah=?,updated_at=? WHERE id=?').bind(stock.jumlah,now,stock.id));
+    statements.push(env.DB.prepare('INSERT INTO inventaris_logs (id,waktu,user_uid,nama_user,tipe,nama_barang,jumlah,lokasi) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(crypto.randomUUID(),now,user.uid,user.profile.nama||user.email,'Penjualan',stock.barang,sold,'Kulkas'));
+  }
+  await env.DB.batch(statements);
+  return reply(request,env,{ok:true,id,total_nominal:total,stocks});
+}
+
 async function upsert(env,table,id,data,merge){
   const pk=primary(table),encoded=encode(table,{...data,[pk]:id});
   const keys=Object.keys(encoded); if(!keys.length)throw Object.assign(new Error('Data kosong.'),{status:400});
@@ -146,7 +182,7 @@ async function deleteInventoryLog(request,env,user,id){
   if(!log)return reply(request,env,{error:'Log barang tidak ditemukan.'},404);
   const stock=await env.DB.prepare('SELECT id,jumlah FROM inventaris_stok WHERE lokasi=? AND nama_barang=?').bind(log.lokasi,log.nama_barang).first();
   const current=Number(stock?.jumlah||0);
-  const next=current+(log.tipe==='WD'?Number(log.jumlah):-Number(log.jumlah));
+  const next=current+(['WD','Penjualan'].includes(log.tipe)?Number(log.jumlah):-Number(log.jumlah));
   if(next<0)return reply(request,env,{error:`Log tidak dapat dihapus karena stok ${log.nama_barang} akan menjadi negatif.`},409);
   const statements=[env.DB.prepare('DELETE FROM inventaris_logs WHERE id=?').bind(id)];
   if(stock)statements.unshift(env.DB.prepare('UPDATE inventaris_stok SET jumlah=?,updated_at=? WHERE id=?').bind(next,new Date().toISOString(),stock.id));
@@ -217,6 +253,7 @@ export default {async fetch(request,env){
     if(url.pathname==='/api/me')return reply(request,env,{user:{uid:user.uid,email:user.email,...user.profile}});
     if(url.pathname==='/api/attendance'&&request.method==='POST')return await attendanceTransaction(request,env,user);
     if(url.pathname==='/api/inventory/transaction'&&request.method==='POST')return await inventoryTransaction(request,env,user);
+    if(url.pathname==='/api/sales/transaction'&&request.method==='POST')return await salesTransaction(request,env,user);
     if(url.pathname==='/api/sales/ranking'&&request.method==='GET')return await salesRanking(request,env,url);
     if(url.pathname.startsWith('/api/inventory/log/')&&request.method==='DELETE')return await deleteInventoryLog(request,env,user,url.pathname.split('/').pop());
     if(url.pathname.startsWith('/api/data/'))return await dataRoute(request,env,user,url);
