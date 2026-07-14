@@ -475,15 +475,16 @@
     }
 
     async function loadKaryawan() {
+      let cachedList = null;
       try {
         const lsData = localStorage.getItem(KARYAWAN_LS_KEY);
         const lsTs   = localStorage.getItem(KARYAWAN_LS_TS_KEY);
         if (lsData && lsTs && (Date.now()-parseInt(lsTs)) < KARYAWAN_CACHE_TTL) {
-          karyawanList = JSON.parse(lsData); Cache.karyawan = karyawanList;
-          populateDropdowns(); return;
+          cachedList = JSON.parse(lsData);
+          karyawanList = cachedList; Cache.karyawan = karyawanList;
+          populateDropdowns();
         }
       } catch(e) {}
-      if (Cache.karyawan) { karyawanList = Cache.karyawan; populateDropdowns(); return; }
       try {
         const snap = await getDocs(query(collection(db,'karyawan'), limit(50)));
         karyawanList = snap.docs.map(d=>({id:d.id,...d.data()}));
@@ -491,7 +492,12 @@
         localStorage.setItem(KARYAWAN_LS_KEY, JSON.stringify(karyawanList));
         localStorage.setItem(KARYAWAN_LS_TS_KEY, Date.now().toString());
         populateDropdowns();
-      } catch(e) { showToast('error','Gagal Memuat Data Karyawan.'); }
+      } catch(e) {
+        if (!cachedList && Cache.karyawan) {
+          karyawanList = Cache.karyawan;
+          populateDropdowns();
+        } else if (!cachedList) showToast('error','Gagal Memuat Data Karyawan.');
+      }
     }
 
     function currentEmployeeFor(row) {
@@ -630,8 +636,10 @@
       const cacheKey = `rekap|${employeeId}|${dari}|${sampai}`;
       const cached   = Cache.getRekap(cacheKey);
       if (cached) {
-        renderRekapTable(cached); updateRekapStats(cached);
-        document.getElementById('rekap-count-label').textContent = cached.length+' Data Ditemukan (Cache)'; return;
+        const displayRows = cached.map(withCurrentEmployeeDisplay);
+        Cache.setRekap(cacheKey, displayRows);
+        renderRekapTable(displayRows); updateRekapStats(displayRows);
+        document.getElementById('rekap-count-label').textContent = displayRows.length+' Data Ditemukan (Cache)'; return;
       }
       _loadingRekap = true; showEl('rekap-loading');
       document.getElementById('rekap-tbody').innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-400">Memuat Data...</td></tr>';
@@ -1886,7 +1894,7 @@
       }
     });
   </script>
-  <script src="sales-cooking.js?v=20260712-10"></script>
+  <script src="sales-cooking.js?v=20260714-11"></script>
 
   <style>
     body{font-family:'Plus Jakarta Sans',sans-serif;background:#fff;}

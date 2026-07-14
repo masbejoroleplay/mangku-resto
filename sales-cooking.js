@@ -271,7 +271,7 @@
       const {rows=[]} = await apiRequest(`/api/sales/ranking?${params}`);
       if(!rows.length){tbody.innerHTML='<tr><td colspan="4" class="text-center py-10 text-slate-400">Belum ada data pada periode ini.</td></tr>';return;}
       const medals=['bg-blue-100 text-blue-700','bg-slate-200 text-slate-700','bg-sky-100 text-sky-700'];
-      tbody.innerHTML=rows.map((row,index)=>`<tr><td class="text-center"><span class="rank-medal ${medals[index]||'bg-sky-50 text-sky-700'}">${index+1}</span></td><td class="font-bold text-slate-900">${esc(row.nama)}</td><td class="text-center font-semibold">${row.transaksi}</td><td class="font-black text-sky-700">${rupiah(row.total)}</td></tr>`).join('');
+      tbody.innerHTML=rows.map((row,index)=>`<tr><td class="text-center"><span class="rank-medal ${medals[index]||'bg-sky-50 text-sky-700'}">${index+1}</span></td><td class="font-bold text-slate-900">${esc(currentEmployeeName(row))}</td><td class="text-center font-semibold">${row.transaksi}</td><td class="font-black text-sky-700">${rupiah(row.total)}</td></tr>`).join('');
     } catch(error){tbody.innerHTML=`<tr><td colspan="4" class="text-center py-10 text-rose-500">Gagal: ${esc(error.message)}</td></tr>`;}
   };
 

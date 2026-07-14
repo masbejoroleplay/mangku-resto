@@ -102,6 +102,7 @@ async function salesRanking(request,env,url){
   const from=url.searchParams.get('from'),to=url.searchParams.get('to');
   let sql=`SELECT COALESCE(NULLIF(p.id_karyawan,''),NULLIF(p.user_uid,''),p.nama) AS seller_key,
     COALESCE(MAX(NULLIF(employee.nama,'')),MAX(NULLIF(account.nama,'')),MAX(NULLIF(p.nama,'')),'-') AS nama,
+    MAX(NULLIF(p.id_karyawan,'')) AS id_karyawan, MAX(NULLIF(p.user_uid,'')) AS user_uid,
     COUNT(*) AS transaksi, COALESCE(SUM(p.total_nominal),0) AS total
     FROM penjualan p
     LEFT JOIN users employee ON employee.id_karyawan=NULLIF(p.id_karyawan,'')
@@ -112,7 +113,8 @@ async function salesRanking(request,env,url){
   sql+=` GROUP BY seller_key ORDER BY total DESC, nama ASC`;
   const result=await env.DB.prepare(sql).bind(...args).all();
   return reply(request,env,{rows:result.results.map(row=>({
-    nama:row.nama,transaksi:Number(row.transaksi||0),total:Number(row.total||0)
+    id_karyawan:row.id_karyawan||'',user_uid:row.user_uid||'',nama:row.nama,
+    transaksi:Number(row.transaksi||0),total:Number(row.total||0)
   }))});
 }
 
