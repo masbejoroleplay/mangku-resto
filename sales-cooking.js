@@ -4,9 +4,9 @@
   const MENU_PRICES = Object.freeze({
     'Paket Kenyang': 175000,
     'Paket Biasa': 65000,
-    'Android': 60000,
-    'Iphone': 550000,
-    'Radio': 15000,
+    'HP Android': 60000,
+    'HP Iphone': 550000,
+    'Radio': 35000,
     'Rokok': 10000,
     'Korek': 2000,
     'Boombox': 350000
@@ -26,8 +26,20 @@
     if (typeof value.toDate === 'function') return value.toDate().getTime();
     return new Date(value).getTime() || 0;
   };
+  const normalizeMenuName = value => ({
+    'android':'HP Android',
+    'hp android':'HP Android',
+    'iphone':'HP Iphone',
+    'hp iphone':'HP Iphone'
+  })[String(value||'').trim().toLowerCase()] || value;
+  const currentEmployee = row => (Array.isArray(karyawanList) ? karyawanList : []).find(employee =>
+    (row.id_karyawan && employee.id_karyawan === row.id_karyawan) ||
+    (!row.id_karyawan && row.user_uid && employee.uid === row.user_uid)
+  );
+  const currentEmployeeName = row => currentEmployee(row)?.nama || row.nama || '-';
 
   function menuOptions(selected = '') {
+    selected = normalizeMenuName(selected);
     return `<option value="" disabled ${!selected?'selected':''}>-- Pilih Barang --</option>` + Object.entries(MENU_PRICES).map(([name, price]) => `<option value="${esc(name)}" ${name===selected?'selected':''}>${esc(name)} — ${rupiah(price)}</option>`).join('');
   }
 
@@ -53,7 +65,7 @@
     });
     records.forEach(row => {
       const key = row.id_karyawan || row.user_uid || row.nama;
-      if (key) map.set(key, row.nama || key);
+      if (key && !map.has(key)) map.set(key, currentEmployeeName(row) || key);
     });
     select.innerHTML = '<option value="">Semua Karyawan</option>' + [...map].sort((a,b)=>a[1].localeCompare(b[1])).map(([key,name])=>`<option value="${esc(key)}">${esc(name)}</option>`).join('');
     if ([...select.options].some(option => option.value === previous)) select.value = previous;
@@ -202,7 +214,7 @@
     tbody.innerHTML = rows.map(row => {
       const items = (row.items || []).map(item => `<div class="whitespace-nowrap"><strong>${esc(item.menu)}</strong> ${Number(item.qty)||0}x <span class="text-slate-400">(${rupiah(item.subtotal)})</span></div>`).join('');
       const actions = isAdmin() ? `<td><div class="flex gap-2"><button onclick='openSalesEdit(${JSON.stringify(row.id)})' class="px-3 py-1.5 rounded-lg bg-sky-50 text-sky-700 font-bold text-xs border border-sky-200"><i class="fas fa-pencil mr-1"></i>Edit</button><button onclick='deleteSalesRecord(${JSON.stringify(row.id)})' class="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 font-bold text-xs border border-rose-200"><i class="fas fa-trash-alt mr-1"></i>Hapus</button></div></td>` : '';
-      return `<tr><td class="font-semibold">${esc(row.tanggal||'-')}</td><td>${esc(row.nama||'-')}</td><td>${items||'-'}</td><td class="font-black text-sky-700 whitespace-nowrap">${rupiah(row.total_nominal)}</td>${actions}</tr>`;
+      return `<tr><td class="font-semibold">${esc(row.tanggal||'-')}</td><td>${esc(currentEmployeeName(row))}</td><td>${items||'-'}</td><td class="font-black text-sky-700 whitespace-nowrap">${rupiah(row.total_nominal)}</td>${actions}</tr>`;
     }).join('');
   }
 

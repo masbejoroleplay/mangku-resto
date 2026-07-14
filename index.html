@@ -494,6 +494,18 @@
       } catch(e) { showToast('error','Gagal Memuat Data Karyawan.'); }
     }
 
+    function currentEmployeeFor(row) {
+      return karyawanList.find(k =>
+        (row?.id_karyawan && k.id_karyawan === row.id_karyawan) ||
+        (!row?.id_karyawan && row?.user_uid && k.uid === row.user_uid)
+      );
+    }
+
+    function withCurrentEmployeeDisplay(row) {
+      const employee = currentEmployeeFor(row);
+      return employee ? { ...row, nama:employee.nama || row.nama, jabatan:employee.jabatan || row.jabatan } : row;
+    }
+
     function populateDropdowns() {
       const isAdmin = currentProfile.role === 'admin';
       const sel = document.getElementById('select-nama');
@@ -522,7 +534,8 @@
         const list = isAdmin ? karyawanList : karyawanList.filter(k=>k.id_karyawan===currentProfile.id_karyawan);
         list.forEach(k => {
           const o = document.createElement('option');
-          o.value = isFilter ? k.nama : k.id_karyawan; o.textContent = k.nama;
+          const filterByEmployeeId = id === 'rekap-filter-nama' || id === 'gaji-filter-nama';
+          o.value = isFilter ? (filterByEmployeeId ? k.id_karyawan : k.nama) : k.id_karyawan; o.textContent = k.nama;
           o.dataset.id = k.id_karyawan; o.dataset.nama = k.nama; o.dataset.jabatan = k.jabatan;
           el.appendChild(o);
         });
@@ -536,9 +549,9 @@
       }
       if (!isAdmin) {
         const rn = document.getElementById('rekap-filter-nama');
-        if (rn) rn.value = currentProfile.nama;
+        if (rn) rn.value = currentProfile.id_karyawan;
         const gn = document.getElementById('gaji-filter-nama');
-        if (gn) gn.value = currentProfile.nama;
+        if (gn) gn.value = currentProfile.id_karyawan;
       }
       initializeFilterTanggal();
     }
@@ -603,18 +616,18 @@
     async function _execLoadRekap() {
       if (_loadingRekap) return;
       const isAdmin = currentProfile.role === 'admin';
-      const nama   = isAdmin ? document.getElementById('rekap-filter-nama').value : currentProfile.nama;
+      const employeeId = isAdmin ? document.getElementById('rekap-filter-nama').value : currentProfile.id_karyawan;
       let dari     = document.getElementById('rekap-dari').value;
       let sampai   = document.getElementById('rekap-sampai').value;
-      if (isAdmin && !nama && !dari && !sampai) {
+      if (isAdmin && !employeeId && !dari && !sampai) {
         dari = get7DaysAgoStr(); sampai = getLocalDateStr();
         document.getElementById('rekap-dari').value   = dari;
         document.getElementById('rekap-sampai').value = sampai;
       }
-      if (isAdmin && !nama && !dari && !sampai) {
+      if (isAdmin && !employeeId && !dari && !sampai) {
         showToast('warning','Pilih Nama Karyawan Atau Rentang Tanggal.'); return;
       }
-      const cacheKey = `rekap|${nama}|${dari}|${sampai}`;
+      const cacheKey = `rekap|${employeeId}|${dari}|${sampai}`;
       const cached   = Cache.getRekap(cacheKey);
       if (cached) {
         renderRekapTable(cached); updateRekapStats(cached);
@@ -626,8 +639,8 @@
         let snap;
         if (!isAdmin) {
           snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',currentProfile.id_karyawan), limit(100)));
-        } else if (nama) {
-          snap = await getDocs(query(collection(db,'absensi'), where('nama','==',nama)));
+        } else if (employeeId) {
+          snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',employeeId)));
         } else if (dari && sampai) {
           snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), where('tanggal','<=',sampai), limit(200)));
         } else if (dari) {
@@ -635,10 +648,10 @@
         } else {
           snap = await getDocs(query(collection(db,'absensi'), where('tanggal','<=',sampai), limit(200)));
         }
-        let data = snap.docs.map(d=>({id:d.id,...d.data()}));
+        let data = snap.docs.map(d=>withCurrentEmployeeDisplay({id:d.id,...d.data()}));
         if (!isAdmin) { const b=get7DaysAgoStr(); data=data.filter(r=>r.tanggal>=b); }
-        if (dari && nama)   data = data.filter(r=>r.tanggal>=dari);
-        if (sampai && nama) data = data.filter(r=>r.tanggal<=sampai);
+        if (dari && employeeId)   data = data.filter(r=>r.tanggal>=dari);
+        if (sampai && employeeId) data = data.filter(r=>r.tanggal<=sampai);
         data.sort((a,b)=>b.tanggal.localeCompare(a.tanggal));
         Cache.setRekap(cacheKey, data);
         renderRekapTable(data); updateRekapStats(data);
@@ -766,11 +779,11 @@
     async function _execLoadRekapGaji() {
       if (_loadingGaji) return;
       const isAdmin    = currentProfile.role === 'admin';
-      const filterNama = isAdmin ? document.getElementById('gaji-filter-nama').value : currentProfile.nama;
+      const filterEmployeeId = isAdmin ? document.getElementById('gaji-filter-nama').value : currentProfile.id_karyawan;
       const dari       = document.getElementById('gaji-dari').value;
       const sampai     = document.getElementById('gaji-sampai').value;
-      if (isAdmin && !filterNama && !dari && !sampai) { showToast('warning','Pilih Nama Atau Rentang Tanggal.'); return; }
-      const cacheKey = `gaji|${filterNama}|${dari}|${sampai}`;
+      if (isAdmin && !filterEmployeeId && !dari && !sampai) { showToast('warning','Pilih Nama Atau Rentang Tanggal.'); return; }
+      const cacheKey = `gaji|${filterEmployeeId}|${dari}|${sampai}`;
       const cached   = Cache.getGaji(cacheKey);
       if (cached) {
         gajiCurrentData=cached; renderGajiTable(gajiCurrentData); updateGajiStats(gajiCurrentData, isAdmin);
@@ -783,8 +796,8 @@
         let snap;
         if (!isAdmin) {
           snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',currentProfile.id_karyawan), limit(100)));
-        } else if (filterNama) {
-          snap = await getDocs(query(collection(db,'absensi'), where('nama','==',filterNama)));
+        } else if (filterEmployeeId) {
+          snap = await getDocs(query(collection(db,'absensi'), where('id_karyawan','==',filterEmployeeId)));
         } else if (dari && sampai) {
           snap = await getDocs(query(collection(db,'absensi'), where('tanggal','>=',dari), where('tanggal','<=',sampai), limit(200)));
         } else if (dari) {
@@ -792,10 +805,10 @@
         } else {
           snap = await getDocs(query(collection(db,'absensi'), where('tanggal','<=',sampai), limit(200)));
         }
-        let absensiData = snap.docs.map(d=>d.data()).filter(d=>d.clock_out);
+        let absensiData = snap.docs.map(d=>withCurrentEmployeeDisplay(d.data())).filter(d=>d.clock_out);
         if (!isAdmin) { const b=get7DaysAgoStr(); absensiData=absensiData.filter(r=>r.tanggal>=b); }
-        if (dari && filterNama)   absensiData = absensiData.filter(r=>r.tanggal>=dari);
-        if (sampai && filterNama) absensiData = absensiData.filter(r=>r.tanggal<=sampai);
+        if (dari && filterEmployeeId)   absensiData = absensiData.filter(r=>r.tanggal>=dari);
+        if (sampai && filterEmployeeId) absensiData = absensiData.filter(r=>r.tanggal<=sampai);
         const map={};
         absensiData.forEach(row => {
           const key=row.id_karyawan||row.nama;
@@ -1142,6 +1155,8 @@
         // Update local storage
         localStorage.removeItem(KARYAWAN_LS_KEY);
         localStorage.removeItem(KARYAWAN_LS_TS_KEY);
+        Cache.invalidateRekap();
+        Cache._gaji = {};
         
         showToast('success', `✅ Data berhasil diperbarui`);
         hideEl('edit-user-modal');

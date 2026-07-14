@@ -24,9 +24,17 @@ const WEBHOOK_SECRETS = {
   laporan_masak:'DISCORD_WEBHOOK_LAPORAN_MASAK', cuti:'DISCORD_WEBHOOK_CUTI'
 };
 const MENU_PRICES = Object.freeze({
-  'Paket Kenyang':175000,'Paket Biasa':65000,'Android':60000,'Iphone':550000,
-  'Radio':15000,'Rokok':10000,'Korek':2000,'Boombox':350000
+  'Paket Kenyang':175000,'Paket Biasa':65000,'HP Android':60000,'HP Iphone':550000,
+  'Radio':35000,'Rokok':10000,'Korek':2000,'Boombox':350000
 });
+const MENU_ALIASES = Object.freeze({
+  'android':'HP Android','hp android':'HP Android',
+  'iphone':'HP Iphone','hp iphone':'HP Iphone'
+});
+const normalizeMenuName = value => {
+  const name=String(value||'').trim();
+  return MENU_ALIASES[name.toLowerCase()]||Object.keys(MENU_PRICES).find(item=>item.toLowerCase()===name.toLowerCase())||name;
+};
 
 function cors(request, env) {
   const origin=request.headers.get('Origin')||'';
@@ -92,12 +100,14 @@ async function listRows(request,env,user,table,url){
 
 async function salesRanking(request,env,url){
   const from=url.searchParams.get('from'),to=url.searchParams.get('to');
-  let sql=`SELECT COALESCE(NULLIF(id_karyawan,''),NULLIF(user_uid,''),nama) AS seller_key,
-    COALESCE(MAX(NULLIF(nama,'')),'-') AS nama, COUNT(*) AS transaksi,
-    COALESCE(SUM(total_nominal),0) AS total
-    FROM penjualan`,args=[],where=[];
-  if(from){where.push('tanggal >= ?');args.push(from)}
-  if(to){where.push('tanggal <= ?');args.push(to)}
+  let sql=`SELECT COALESCE(NULLIF(p.id_karyawan,''),NULLIF(p.user_uid,''),p.nama) AS seller_key,
+    COALESCE(MAX(NULLIF(employee.nama,'')),MAX(NULLIF(account.nama,'')),MAX(NULLIF(p.nama,'')),'-') AS nama,
+    COUNT(*) AS transaksi, COALESCE(SUM(p.total_nominal),0) AS total
+    FROM penjualan p
+    LEFT JOIN users employee ON employee.id_karyawan=NULLIF(p.id_karyawan,'')
+    LEFT JOIN users account ON account.uid=p.user_uid`,args=[],where=[];
+  if(from){where.push('p.tanggal >= ?');args.push(from)}
+  if(to){where.push('p.tanggal <= ?');args.push(to)}
   if(where.length)sql+=' WHERE '+where.join(' AND ');
   sql+=` GROUP BY seller_key ORDER BY total DESC, nama ASC`;
   const result=await env.DB.prepare(sql).bind(...args).all();
@@ -112,24 +122,24 @@ async function salesTransaction(request,env,user){
     return reply(request,env,{error:'Data penjualan tidak valid.'},400);
   const merged=new Map();
   for(const raw of items){
-    const menu=String(raw.menu||'').trim(),qty=Number(raw.qty);
+    const menu=normalizeMenuName(raw.menu),qty=Number(raw.qty);
     if(!MENU_PRICES[menu]||!Number.isInteger(qty)||qty<1)return reply(request,env,{error:'Item penjualan tidak valid.'},400);
     merged.set(menu,(merged.get(menu)||0)+qty);
   }
   const normalized=[...merged].map(([menu,qty])=>({menu,qty,harga_satuan:MENU_PRICES[menu],subtotal:MENU_PRICES[menu]*qty}));
   const stocks=[];
   for(const item of normalized){
-    const row=await env.DB.prepare('SELECT id,jumlah FROM inventaris_stok WHERE lokasi=? AND nama_barang=?').bind('Kulkas',item.menu).first();
+    const row=await env.DB.prepare('SELECT id,nama_barang,jumlah FROM inventaris_stok WHERE lokasi=? AND LOWER(TRIM(nama_barang))=LOWER(?) LIMIT 1').bind('Kulkas',item.menu).first();
     const current=Number(row?.jumlah||0),next=current-item.qty;
     if(next<0)return reply(request,env,{error:`Stok ${item.menu} tidak mencukupi. Saat ini: ${current}`},409);
-    stocks.push({barang:item.menu,jumlah:next,id:row.id});
+    stocks.push({barang:row.nama_barang,menu:item.menu,jumlah:next,id:row.id});
   }
   const id=crypto.randomUUID(),now=new Date().toISOString();
   const total=normalized.reduce((sum,item)=>sum+item.subtotal,0);
   const statements=[env.DB.prepare('INSERT INTO penjualan (id,user_uid,id_karyawan,nama,tanggal,items,total_nominal,created_at) VALUES (?,?,?,?,?,?,?,?)')
     .bind(id,user.uid,user.profile.id_karyawan||'',user.profile.nama||user.email,tanggal,JSON.stringify(normalized),total,now)];
   for(const stock of stocks){
-    const sold=normalized.find(item=>item.menu===stock.barang).qty;
+    const sold=normalized.find(item=>item.menu===stock.menu).qty;
     statements.push(env.DB.prepare('UPDATE inventaris_stok SET jumlah=?,updated_at=? WHERE id=?').bind(stock.jumlah,now,stock.id));
     statements.push(env.DB.prepare('INSERT INTO inventaris_logs (id,waktu,user_uid,nama_user,tipe,nama_barang,jumlah,lokasi) VALUES (?,?,?,?,?,?,?,?)')
       .bind(crypto.randomUUID(),now,user.uid,user.profile.nama||user.email,'Penjualan',stock.barang,sold,'Kulkas'));
@@ -195,15 +205,15 @@ async function attendanceTransaction(request,env,user){
   if(!['clockIn','clockOut'].includes(action))return reply(request,env,{error:'Aksi absensi tidak valid.'},400);
   const now=new Date(),iso=now.toISOString(),tanggal=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Jakarta',year:'numeric',month:'2-digit',day:'2-digit'}).format(now),employee=user.profile.id_karyawan;
   if(action==='clockIn'){
-    const open=await env.DB.prepare('SELECT id FROM absensi WHERE id_karyawan=? AND tanggal=? AND clock_out IS NULL LIMIT 1').bind(employee,tanggal).first();
-    if(open)return reply(request,env,{error:'Masih ada sesi aktif yang belum Clock Out hari ini.'},409);
+    const open=await env.DB.prepare('SELECT id FROM absensi WHERE id_karyawan=? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1').bind(employee).first();
+    if(open)return reply(request,env,{error:'Masih ada sesi aktif yang belum Clock Out.'},409);
     const id=crypto.randomUUID();
     await env.DB.prepare('INSERT INTO absensi (id,user_uid,id_karyawan,nama,jabatan,tanggal,clock_in,clock_out,total_menit,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .bind(id,user.uid,employee,user.profile.nama,user.profile.jabatan||'',tanggal,iso,null,null,iso).run();
     return reply(request,env,{id,clock_in:iso});
   }
-  const open=await env.DB.prepare('SELECT id,clock_in FROM absensi WHERE id_karyawan=? AND tanggal=? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1').bind(employee,tanggal).first();
-  if(!open)return reply(request,env,{error:'Tidak ada sesi Clock In aktif hari ini.'},409);
+  const open=await env.DB.prepare('SELECT id,clock_in FROM absensi WHERE id_karyawan=? AND clock_out IS NULL ORDER BY clock_in DESC LIMIT 1').bind(employee).first();
+  if(!open)return reply(request,env,{error:'Tidak ada sesi Clock In aktif.'},409);
   const total=Math.max(0,Math.round((now-new Date(open.clock_in))/60000));
   await env.DB.prepare('UPDATE absensi SET clock_out=?,total_menit=?,updated_at=? WHERE id=?').bind(iso,total,iso,open.id).run();
   return reply(request,env,{id:open.id,clock_out:iso,total_menit:total});
