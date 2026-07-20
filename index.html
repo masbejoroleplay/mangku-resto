@@ -238,9 +238,11 @@
     // ── SALARY RATES ──────────────────────────────────────────────
     const SALARY_RATES = {
       'Magang':  { gaji_24_jam: 1500000 },
-      'Pelayan': { gaji_24_jam: 3000000 },
-      'Koki':    { gaji_24_jam: 3500000 },
-      'HRD':     { gaji_24_jam: 4000000 },
+      'Pelayan':    { gaji_24_jam: 2000000 },
+      'Koki':       { gaji_24_jam: 3000000 },
+      'HRD':        { gaji_24_jam: 3500000 },
+      'Supervisor': { gaji_24_jam: 4000000 },
+      'Manager':    { gaji_24_jam: 4500000 },
     };
     const OVERTIME_THRESHOLD_JAM = 24;
     const OVERTIME_RATE_PER_JAM  = 50000;
@@ -2099,6 +2101,8 @@
           <option value="Pelayan">Pelayan</option>
           <option value="Koki">Koki</option>
           <option value="HRD">HRD</option>
+          <option value="Supervisor">Supervisor</option>
+          <option value="Manager">Manager</option>
           <option value="Boss">Boss</option>
         </select>
       </div>
@@ -2327,7 +2331,7 @@
               <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Username / Email <span class="text-rose-500">*</span></label><input id="akun-username" type="text" class="input-field" placeholder="username atau email lengkap" oninput="updateEmailPreview()"><p id="akun-email-preview" class="text-xs text-teal-600 font-semibold mt-1.5"></p><p class="text-xs text-slate-400 mt-0.5">Username otomatis terisi dari nama.</p></div>
               <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Role <span class="text-rose-500">*</span></label><select id="akun-role" class="input-field pr-10"><option value="" disabled selected>-- Pilih Role --</option><option value="staff">Karyawan</option><option value="admin">Admin</option></select></div>
               <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">ID Karyawan</label><input id="akun-id-karyawan" type="text" class="input-field" placeholder="Contoh: K001"></div>
-              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jabatan</label><select id="akun-jabatan" class="input-field pr-10"><option value="" disabled selected>-- Pilih Jabatan --</option><option value="Magang">Magang</option><option value="Pelayan">Pelayan</option><option value="Koki">Koki</option><option value="HRD">HRD</option><option value="Boss">Boss</option></select></div>
+              <div><label class="mb-1.5 block text-sm font-semibold text-slate-600">Jabatan</label><select id="akun-jabatan" class="input-field pr-10"><option value="" disabled selected>-- Pilih Jabatan --</option><option value="Magang">Magang</option><option value="Pelayan">Pelayan</option><option value="Koki">Koki</option><option value="HRD">HRD</option><option value="Supervisor">Supervisor</option><option value="Manager">Manager</option><option value="Boss">Boss</option></select></div>
               <div class="pt-1"><button id="btn-buat-akun" onclick="buatAkun()" class="btn-purple w-full flex items-center justify-center gap-2"><i class="fas fa-plus"></i> Buat Akun</button></div>
             </div>
           </div>
